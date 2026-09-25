@@ -166,3 +166,36 @@ def write_kev(path: Path, calibrations: Mapping[Key, tuple[float, float]]) -> Pa
         lines.append(" ".join(str(v) for v in key) + f" {slope:.6f} {intercept:.6f}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def add_pairs(
+    board: BoardData,
+    anode: tuple[int, int],
+    cathode: tuple[int, int],
+    pairs: Iterable[tuple[int, int]],
+    *,
+    source: int = 0,
+    t0: int = 1000,
+    spacing: int = 1000,
+    dcts: int = 5,
+) -> BoardData:
+    """Append 1A1C events (``(anode PHA, cathode PHA)`` pairs) well separated in CTS."""
+    t = t0
+    for a_pha, c_pha in pairs:
+        board.anode.add(anode[0], anode[1], int(a_pha), t, source)
+        board.cathode.add(cathode[0], cathode[1], int(c_pha), t + dcts, source)
+        t += spacing
+    return board
+
+
+def tie_pairs(scale: float) -> list[tuple[int, int]]:
+    """Legacy test pattern (keV x ``scale``): three peak columns and a tie broken by the last pair.
+
+    With an identity calibration the legacy fit sees 4 peaks; with slope
+    ``1/scale`` != 1 the EOF quirk drops the last pair and it sees 3.
+    """
+    events: list[tuple[float, float]] = []
+    for ca, energy, n in [(0.1, 505.0, 30), (0.5, 499.0, 30), (0.9, 487.0, 30)]:
+        events += [(energy, ca * energy)] * n
+    events += [(493.0, 0.3 * 493.0)] * 7 + [(511.0, 0.3 * 511.0)] * 8
+    return [(round(a * scale), round(c * scale)) for a, c in events]

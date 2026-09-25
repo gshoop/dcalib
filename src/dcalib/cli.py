@@ -6,11 +6,15 @@ Subcommands (plan section 8):
     Depth-calibrate every anode of an adc2kev calibration cache and write
     ``<name>.dcc`` and ``depth_summary.csv``. Phase 4.
 
-``dcalib legacy CACHE --output-dir DIR [...]``
-    Run the replica of the legacy C++ Dcalib and write ``<name>_legacy.dcc``
-    and ``legacy_summary.csv``. Phase 2.
+``dcalib legacy CACHE --output-dir DIR [--kev KEV] [--energy {511,662}]
+[--no-eof-quirk]``
+    Run the replica of the legacy C++ Dcalib (:mod:`dcalib.legacy`) on the
+    cache's 1-anode/1-cathode events of one source (Ge-68 for 511, Cs-137 for
+    662) and write ``<name>_legacy.dcc`` and ``legacy_summary.csv``. It never
+    touches the sidecar results file.
 
-Both subcommands are registered but not implemented yet; they exit with status 1.
+Exit codes: 0 on success, 1 on an error, 2 for a missing input file or bad
+arguments, 130 when stopped with Ctrl-C.
 """
 
 from __future__ import annotations
@@ -19,9 +23,22 @@ import argparse
 import logging
 import math
 import sys
+import time
+from collections import Counter
 from pathlib import Path
+from typing import TextIO
+
+import h5py
+from adc2kev.cache import CalibrationCache
 
 from dcalib import __version__
+from dcalib.calib import CalibrationError, Calibrations, load_calibrations
+from dcalib.io import cache_stem
+from dcalib.io.dcc import write_dcc
+from dcalib.io.export import prepare_output_dir
+from dcalib.io.summary_csv import LEGACY_SUMMARY_NAME, write_legacy_summary
+from dcalib.legacy import legacy_all, legacy_constants
+from dcalib.options import STATUS_OK
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +206,126 @@ def _run_process(args: argparse.Namespace) -> int:
     return _not_implemented(args.command, phase=4)
 
 
+class _ProgressPrinter:
+    """Throttled progress callback that writes to a stream (stderr).
+
+    On a terminal the line is redrawn in place at every whole percent; on a
+    pipe or file a new line is written every 10 %.
+    """
+
+    def __init__(self, label: str, stream: TextIO | None = None) -> None:
+        self._label = label
+        self._stream = stream if stream is not None else sys.stderr
+        self._tty = bool(getattr(self._stream, "isatty", lambda: False)())
+        self._step = 1 if self._tty else 10
+        self._last = -1
+        self._t0 = time.perf_counter()
+
+    def __call__(self, fraction: float) -> None:
+        pct = max(0, min(100, int(fraction * 100)))
+        bucket = pct // self._step
+        if bucket == self._last:
+            return
+        self._last = bucket
+        elapsed = time.perf_counter() - self._t0
+        text = f"{self._label}: {pct:3d}% ({elapsed:5.1f} s)"
+        if self._tty:
+            print(f"\r{text}", end="", file=self._stream, flush=True)
+        else:
+            print(text, file=self._stream, flush=True)
+
+    def close(self) -> None:
+        """End the in-place progress line (terminal only)."""
+        if self._tty and self._last >= 0:
+            print(file=self._stream, flush=True)
+
+
+def _check_inputs(args: argparse.Namespace) -> str | None:
+    """Return an error message for a missing input or a bad output directory."""
+    cache: Path = args.cache
+    if not cache.is_file():
+        return f"cache file not found: {cache}"
+    if args.kev is not None and not args.kev.is_file():
+        return f"--kev file not found: {args.kev}"
+    output_dir: Path = args.output_dir
+    if output_dir.exists() and not output_dir.is_dir():
+        return f"--output-dir {output_dir} exists and is not a directory"
+    return None
+
+
+def _check_cache(cache: Path) -> None:
+    """Raise ValueError unless the cache is a structurally valid adc2kev cache."""
+    if not h5py.is_hdf5(cache):
+        raise ValueError(f"{cache} is not an HDF5 file")
+    valid, message = CalibrationCache(cache).is_cache_structurally_valid()
+    if not valid:
+        raise ValueError(f"{cache} is not a usable adc2kev calibration cache: {message}")
+
+
+def _load_calibrations(args: argparse.Namespace) -> Calibrations:
+    calibrations = load_calibrations(args.cache, args.kev)
+    source = "cache" if args.kev is None else str(args.kev)
+    print(
+        f"Calibrations: {len(calibrations):,} valid channels from {source} "
+        f"(fingerprint {calibrations.fingerprint[:12]})",
+        file=sys.stderr,
+    )
+    return calibrations
+
+
 def _run_legacy(args: argparse.Namespace) -> int:
-    """Run ``dcalib legacy`` (phase 2)."""
-    return _not_implemented(args.command, phase=2)
+    """Run ``dcalib legacy``: the C++ replica on every board, then the two outputs."""
+    error = _check_inputs(args)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    constants = legacy_constants(args.energy)
+    eof_quirk = not args.no_eof_quirk
+    name = cache_stem(args.cache)
+    t_start = time.perf_counter()
+    try:
+        dcc_path, csv_path = prepare_output_dir(
+            args.output_dir, [f"{name}_legacy.dcc", LEGACY_SUMMARY_NAME]
+        )
+        _check_cache(args.cache)
+        calibrations = _load_calibrations(args)
+        progress = _ProgressPrinter("legacy replica")
+        try:
+            results = legacy_all(
+                args.cache,
+                calibrations,
+                constants,
+                eof_quirk=eof_quirk,
+                progress=lambda done, total: progress(done / total if total else 1.0),
+            )
+        finally:
+            progress.close()
+        written = {r.key: r.coefficients for r in results if r.coefficients is not None}
+        write_dcc(dcc_path, written)
+        metadata = [
+            ("cache", args.cache.resolve()),
+            ("calibration", "cache" if args.kev is None else args.kev.resolve()),
+            ("calibration_fingerprint", calibrations.fingerprint),
+            ("energy_kev", constants.energy),
+            ("eof_quirk", "on" if eof_quirk else "off"),
+            ("dcalib_version", __version__),
+        ]
+        write_legacy_summary(csv_path, results, metadata)
+    except (CalibrationError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    statuses = Counter(r.status for r in results)
+    print(
+        f"Legacy replica ({constants.energy} keV, EOF quirk {'on' if eof_quirk else 'off'}): "
+        f"{len(results):,} anodes with events"
+    )
+    print("  status: " + ", ".join(f"{s} {n:,}" for s, n in sorted(statuses.items())))
+    print("Outputs:")
+    print(f"  {dcc_path}  ({statuses.get(STATUS_OK, 0):,} lines)")
+    print(f"  {csv_path}  ({len(results):,} rows)")
+    print(f"Time: {time.perf_counter() - t_start:.1f} s")
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:

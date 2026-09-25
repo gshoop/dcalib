@@ -1,7 +1,8 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-1 are implemented (skeleton; options, channels, calibrations and event building).
+user. Phases 0-2 are implemented (skeleton; options, channels, calibrations and event building;
+the legacy replica, `dcalib legacy` and the C++ cross-check).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -118,10 +119,16 @@ Per `.chd` file (one anode):
      `C/A` is in `[0, 1]` (inclusive).
    - If fewer than `MIN_DATA` pairs are kept, **the file is skipped**. The count is checked
      *before* the next step.
-   - **EOF quirk:** the `while(!eof)` loop re-reads the last line pair once (a failed `>>` leaves the
-     values unchanged), and then `pop_back()` removes the last accepted pair. Net effect: if the
-     file's last real pair passed the gates, all real pairs are kept; if it failed them, the last
-     *accepted* real pair is lost.
+   - **EOF quirk:** the `while(!eof)` loop runs its body once more after the last line pair: every
+     `>>` fails and leaves its variable unchanged, and then `pop_back()` removes the last accepted
+     pair. Because `aEn` and `cEn` were converted to keV *in place*, that extra pass converts the
+     last anode energy a second time (`A' = A·slope + intercept`), and the cathode energy too if the
+     last pair got past the anode gate. The doubled conversion almost never passes the gates, so
+     in practice the last *accepted real* pair is lost, and a file with exactly 20 accepted pairs
+     is fitted with 19 (one with 19 is skipped). Only a near-identity calibration lets the extra
+     pair through, and then it is the one removed. (Phase 2 finding, confirmed against the ROOT
+     binary on hand-made `.chd` files; the first draft of this plan assumed the re-read pair was
+     an exact duplicate.)
 2. **Histogram.** `TH2D` with x = C/A (50 bins on [0, 1.2]) and y = anode keV (50 bins on [300, 600],
    6 keV wide). Filled with every kept pair.
 3. **Peaks.** For each x bin 1..50, take the y bin with the maximum content. The scan starts at y bin 1
@@ -459,6 +466,15 @@ read only the stored results.
   **Done when** every anode with ≥ 3 surviving peaks agrees, and the channel sets are identical.
   This also validates the event layer and the keV conversion against an independent
   implementation.
+
+  **Result (phase 2, 2026-09-24):** boards n1 b17, n5 b22 and n3 b20 (108 `.chd` files, 848,419
+  Ge events; `calibration.kev` on both sides). The C++ binary skipped 8 files (uncalibrated anodes)
+  and wrote 100 lines; `dcalib legacy --kev calibration.kev` (full system, 58 s in one process)
+  gives the same 100 anodes, all with ≥ 3 peaks, and all 100 agree at `rtol = 1e-3`
+  (`atol = 1e-3` keV); the largest difference of the curves over r ∈ [0, 1] is 2.1e-4 % of f. The
+  EOF quirk (section 4.2) was confirmed separately on hand-made `.chd` files where the last pair
+  decides a peak and the `MIN_DATA` check; those C++ outputs are golden values in
+  `tests/test_legacy.py`.
 - **10.4 Pipeline.**
   - Sidecar atomicity and staleness (change a calibration value, and the fingerprint mismatches).
   - Overrides and rejections survive `process`.

@@ -1,0 +1,57 @@
+# dcalib
+
+Depth-of-interaction photopeak calibration for the dual-panel cross-strip CZT PET system, run
+directly on the adc2kev calibration cache (`*.cache.h5`). An anode's photopeak position depends
+slightly on where in the crystal the gamma ray interacted; the cathode-to-anode energy ratio
+r = C/A is a depth proxy. `dcalib` builds one-anode/one-cathode events from the cache, fits each
+anode's photopeak position as a function of r, and writes a per-anode `.dcc` correction in the
+legacy Dcalib layout plus a `depth_summary.csv`. A PyQt6/pyqtgraph GUI (`dcalib-gui`) shows every
+anode's depth curve and before/after spectra, re-fits channels with other options and rejects bad
+corrections. It is a separate package built on [adc2kev](../adc2kev-python), like `uvcorr`.
+
+> Status: phase 0 (project skeleton). The CLI subcommands and the GUI are not implemented yet.
+> See [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md).
+
+## Install
+
+Requires Python 3.10 and an adc2kev checkout at `~/adc2kev-python` (not on PyPI).
+
+```bash
+python3.10 -m venv venv
+venv/bin/pip install --upgrade pip setuptools wheel Cython
+venv/bin/pip install -e ~/adc2kev-python
+venv/bin/pip install -e ".[dev]"
+```
+
+or, equivalently, `make venv install-dev` (use `make ADC2KEV=/path/to/adc2kev-python ...` for
+another checkout).
+
+## CLI usage
+
+_To be written (phases 2 and 4)._ Planned:
+
+```bash
+dcalib process data.cache.h5 --output-dir out/ [--kev calibration.kev] [--workers N]
+dcalib legacy  data.cache.h5 --output-dir out/ [--energy 511]
+```
+
+## GUI usage
+
+_To be written (phases 6-7)._ Planned: `dcalib-gui data.cache.h5`.
+
+## Development
+
+The Makefile uses `./venv` automatically when it exists.
+
+| Target | Runs |
+|--------|------|
+| `make format` / `make format-check` | `black` (`--check`) |
+| `make lint` | `ruff check` |
+| `make type-check` | `mypy src/` |
+| `make test` | `pytest -m "not realdata"` |
+| `make test-realdata` | `pytest -m realdata` (needs the full-system test cache) |
+| `make dev-check` | format, lint, type-check, test |
+| `make check` | format-check, lint, type-check, test (no file changes) |
+
+GUI tests use pytest-qt and run on Qt's `offscreen` platform by default; set `QT_QPA_PLATFORM`
+to override.

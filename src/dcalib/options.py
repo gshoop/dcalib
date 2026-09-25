@@ -2,7 +2,10 @@
 
 ``DepthOptions`` holds every threshold of the event building and the default
 depth fit (plan sections 5.1 and 5.3). The numeric defaults are the plan's
-initial values; the phase-4 census retunes them (open item O1).
+initial values except the slice fit window, widened from ``[mu - 1.5 sigma,
+mu + 2.5 sigma]`` to ``[mu - 2 sigma, mu + 3 sigma]`` by the phase-3 synthetic
+study (it halves the slice position error; ``docs/ALGORITHM.md``). The
+phase-4 census retunes them (open item O1).
 
 The status, flag and review strings below are the single source of truth for
 the ``status``, ``flags`` and ``review`` CSV columns (plan 5.3 and 6.4).
@@ -256,8 +259,8 @@ class DepthOptions:
     hist_lo: float = 0.80
     hist_hi: float = 1.15
     hist_bin: float = 0.0025
-    window_lo_sigma: float = 1.5
-    window_hi_sigma: float = 2.5
+    window_lo_sigma: float = 2.0
+    window_hi_sigma: float = 3.0
     window_iterations: int = 3
     max_degree: int = 2
     p_degree: float = 0.01

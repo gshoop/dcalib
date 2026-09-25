@@ -1,8 +1,8 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-2 are implemented (skeleton; options, channels, calibrations and event building;
-the legacy replica, `dcalib legacy` and the C++ cross-check).
+user. Phases 0-3 are implemented (skeleton; options, channels, calibrations and event building;
+the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -222,6 +222,10 @@ the phase-4 census**.
    `[μ − 1.5σ, μ + 2.5σ]`, iterating the window up to 3 times. The window is asymmetric to keep the
    low-energy tail from pulling the centroid. Output: μ ± err, σ, n and status. A failed slice is
    dropped and counted (flag `slice_fit_failed`); fewer than 3 good slices gives `fit_failed`.
+   **Phase 3:** the window is `[μ − 2σ, μ + 3σ]` and keeps the pooled σ as its width (it is only
+   re-centred), which halves the slice position error; the likelihood is minimised with the
+   deviance residuals by a numba Levenberg-Marquardt loop (25× faster than scipy). See
+   `docs/ALGORITHM.md` section 3.
 4. **Curve.** Weighted least squares of μ_i against the slice median r_i for degrees 0, 1 and 2.
    Choose the lowest degree that a nested Δχ² test doesn't reject at `p_degree = 0.01`
    (`max_degree = 2`). The legacy concave-only bound (p2 ≤ 0) is `concave_only`, default off; a
@@ -236,6 +240,11 @@ the phase-4 census**.
    - Accept if `cv_gain ≥ min_gain` (0.01) and no source worsens by more than `max_source_loss`
      (0.005). Otherwise the status is `no_gain`.
    - An accepted anode gets its final coefficients from the fit on **all** its events.
+   - **Phase 3:** implemented as cross-fitting at the degree chosen on all events, and the width
+     ratio is predicted from the alignment of the slice positions of the raw and the out-of-fold
+     corrected energies (`sqrt((σ² + V_corr)/(σ² + V_raw))`), because the Gaussian-core FWHM does
+     not see depth broadening and widths on a few hundred events are too noisy to confirm a 2 %
+     curve (`docs/ALGORITHM.md` section 3.2).
 8. **Source consistency (D6).** Fit the Ge-only and Cs-only curves at the chosen degree (when each
    has ≥ 3 × `per_slice` events). Compare them over the anode's 10-90 % r range; flag
    `source_inconsistent` if max |Δg| > max(0.01, 3σ_Δ). Fleet-level measurement: ≈ 0.4 % mid-range,
@@ -262,7 +271,8 @@ re-centres the photopeak at E0, as the legacy `EN_GOAL` normalisation did. Omitt
 
 For every anode and per source, before (x) and after (x_c; x itself for anodes that aren't `ok`):
 
-- `fwhm_*`: the Gaussian-core FWHM in % of μ (fitter of step 3 on the whole anode).
+- `fwhm_*`: the Gaussian-core FWHM in % of μ (fitter of step 3 on the whole anode). **Phase 3:**
+  the FWHM of the smoothed spectrum instead, like `fwtm_*` (`docs/ALGORITHM.md` section 3.3).
 - `fwtm_*`: the non-parametric full width at 1/10 of the maximum of a lightly smoothed histogram, in
   %. It captures the tail that the depth correction is expected to improve most.
 - The slice points and the curve, with the reduced χ² (`chi2ndf`), `peak_spread` (max − min of the
@@ -542,7 +552,7 @@ Commit at the end of every phase (conventional message, no co-author trailer). E
 
 | # | Item | Default until decided |
 |---|------|-----------------------|
-| O1 | The numeric defaults in section 5.3 (windows, slice sizes, `min_pairs`, `min_gain`, `p_degree`) are informed guesses | Retune in the phase-4 census, as uvcorr did in its phase 3 |
+| O1 | The numeric defaults in section 5.3 (windows, slice sizes, `min_pairs`, `min_gain`, `p_degree`) are informed guesses | Retune in the phase-4 census, as uvcorr did in its phase 3. Phase 3 already widened the slice fit window to `[μ − 2σ, μ + 3σ]` on synthetic data |
 | O2 | The legacy concave-only constraint | Off; `convex_curve` flag; revisit after the census |
 | O3 | Accepted anodes are re-centred at E0 by p0 while omitted anodes keep the `.kev` scale (≲ 0.5 % offset) | Accept; report the fleet offset in the census |
 | O4 | The System Map would become a third fork (adc2kev → uvcorr → dcalib) | Fork uvcorr's (it already has metric colouring and overrides). Upstreaming a generic map into adc2kev is a follow-up for the user to decide |

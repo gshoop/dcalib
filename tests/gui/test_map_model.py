@@ -72,7 +72,12 @@ def test_model_categories_and_summaries() -> None:
     assert anodes[mc.CATEGORY_OK] == 1 and anodes[mc.CATEGORY_FLAGGED] == 1
     assert anodes[mc.CATEGORY_NO_DATA] == 35  # anodes without a view, with data_channels given
     cathodes = status_counts(model, "cathode")
-    assert cathodes == {"cathode_calibrated": 1, "cathode_uncalibrated": 1, "no_data": 6}
+    assert cathodes == {
+        "cathode_calibrated": 1,
+        "cathode_uncalibrated": 1,
+        "not_fitted": 0,
+        "no_data": 6,
+    }
     summary = format_summary(model)
     assert "1 corrected" in summary and "1 calibrated" in summary
     board = format_board_summary(model.boards[(1, 16)])

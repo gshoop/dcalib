@@ -1,9 +1,12 @@
 """The control band above the tabs (plan section 9).
 
 - **Row 1**: Prev/Next, the node, board and anode selectors, the anode's status
-  (in its map colour, readable on the palette) and flags.
+  (in its map colour, readable on the palette) and flags, and **Reject** (a
+  checkable button: checked means the anode is rejected and left out of the
+  ``.dcc``; the main window asks for an optional note).
 - **Row 2**: the depth-fit options the next fit uses (sources, the photopeak
-  window ``x_lo..x_hi``, the maximum degree, the minimum gain) and Fit All.
+  window ``x_lo..x_hi``, the maximum degree, the minimum gain), **Fit Channel**,
+  **Fit Board**, **Revert to batch** and Fit All.
 
 The band only reports what the user asked for (signals) and shows what the
 main window tells it; it never touches the session.
@@ -14,6 +17,8 @@ Signals:
     step_requested(int): Prev (-1) or Next (+1).
     options_changed(object): the options fields changed (a ``DepthOptions``).
     fit_all_clicked(): the Fit All button.
+    fit_channel_clicked(), fit_board_clicked(), revert_clicked(): the re-fit buttons.
+    reject_toggled(bool): Reject was checked (True) or unchecked by the user.
 """
 
 from __future__ import annotations
@@ -49,6 +54,10 @@ class ControlBand(QWidget):
     step_requested = pyqtSignal(int)
     options_changed = pyqtSignal(object)
     fit_all_clicked = pyqtSignal()
+    fit_channel_clicked = pyqtSignal()
+    fit_board_clicked = pyqtSignal()
+    revert_clicked = pyqtSignal()
+    reject_toggled = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,6 +82,11 @@ class ControlBand(QWidget):
         self.status_label = QLabel("")
         self.flags_label = QLabel("")
         self.flags_label.setWordWrap(False)
+        self.reject_button = QPushButton("Reject")
+        self.reject_button.setCheckable(True)
+        self.reject_button.setToolTip(
+            "Reject this anode: it is left out of the .dcc (stored in the results file)"
+        )
         for item in (
             self.prev_button,
             self.next_button,
@@ -87,6 +101,7 @@ class ControlBand(QWidget):
         ):
             row1.addWidget(item)
         row1.addStretch(1)
+        row1.addWidget(self.reject_button)
         outer.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -101,6 +116,12 @@ class ControlBand(QWidget):
         self.degree_combo.setToolTip("Highest polynomial degree of g(r)")
         self.gain_spin = self._spin(-0.5, 0.5, 0.005, "Minimum cross-validated gain to accept")
         self.gain_spin.setDecimals(3)
+        self.fit_channel_button = QPushButton("Fit Channel")
+        self.fit_channel_button.setToolTip("Re-fit this anode with these options (an override)")
+        self.fit_board_button = QPushButton("Fit Board")
+        self.fit_board_button.setToolTip("Re-fit every anode of this board with these options")
+        self.revert_button = QPushButton("Revert to batch")
+        self.revert_button.setToolTip("Delete this anode's override: back to the batch result")
         self.fit_all_button = QPushButton("Fit All")
         self.fit_all_button.setToolTip("Analyse every board with these options (Process > Fit All)")
         widget: QWidget
@@ -115,6 +136,9 @@ class ControlBand(QWidget):
             self.degree_combo,
             QLabel("Min gain"),
             self.gain_spin,
+            self.fit_channel_button,
+            self.fit_board_button,
+            self.revert_button,
             self.fit_all_button,
         ):
             row2.addWidget(widget)
@@ -131,6 +155,10 @@ class ControlBand(QWidget):
         for spin in (self.x_lo_spin, self.x_hi_spin, self.gain_spin):
             spin.valueChanged.connect(self._on_options_edited)
         self.fit_all_button.clicked.connect(self.fit_all_clicked.emit)
+        self.fit_channel_button.clicked.connect(self.fit_channel_clicked.emit)
+        self.fit_board_button.clicked.connect(self.fit_board_clicked.emit)
+        self.revert_button.clicked.connect(self.revert_clicked.emit)
+        self.reject_button.toggled.connect(self._on_reject_toggled)
         self.set_options(DepthOptions())
         self.set_enabled(False)
 
@@ -156,6 +184,33 @@ class ControlBand(QWidget):
             self.fit_all_button,
         ):
             widget.setEnabled(enabled)
+
+    def set_actions_enabled(
+        self, *, refit: bool, revert: bool, reject: bool, fit_all: bool, reason: str = ""
+    ) -> None:
+        """Enable the re-fit, revert, reject and Fit All buttons (``reason`` as the tooltip)."""
+        for button, on in (
+            (self.fit_channel_button, refit),
+            (self.fit_board_button, refit),
+            (self.revert_button, revert),
+            (self.reject_button, reject),
+            (self.fit_all_button, fit_all),
+        ):
+            button.setEnabled(on)
+        if reason:
+            for button in (self.fit_channel_button, self.fit_board_button):
+                button.setToolTip(f"Unavailable: {reason}" if not refit else button.toolTip())
+
+    def set_rejected(self, rejected: bool) -> None:
+        """Show the review state without emitting ``reject_toggled``."""
+        self.reject_button.blockSignals(True)
+        self.reject_button.setChecked(rejected)
+        self.reject_button.setText("Rejected" if rejected else "Reject")
+        self.reject_button.blockSignals(False)
+
+    def _on_reject_toggled(self, checked: bool) -> None:
+        self.reject_button.setText("Rejected" if checked else "Reject")
+        self.reject_toggled.emit(checked)
 
     def set_anodes(self, anodes: dict[tuple[int, int], list[AnodeKey]]) -> None:
         """The boards with events and each board's anodes (fills the selectors)."""
@@ -222,6 +277,7 @@ class ControlBand(QWidget):
         finally:
             self._updating = False
         self.show_status(status, flags, review)
+        self.set_rejected(bool(review))
 
     def show_status(self, status: str | None, flags: tuple[str, ...], review: str) -> None:
         category = status_category(status, flags, review=review) if status else CATEGORY_NOT_FITTED

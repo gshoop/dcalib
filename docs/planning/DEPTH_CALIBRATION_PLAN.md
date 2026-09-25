@@ -1,11 +1,12 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-6 are implemented (skeleton; options, channels, calibrations and event building;
+user. Phases 0-7 are implemented (skeleton; options, channels, calibrations and event building;
 the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics;
 the analysis driver, sidecar results, exports, `dcalib process` and the full-system census; the
 held-out validation; the GUI shell with the System Map, the Depth tab, the Fit Inspector and Fit
-All; see `docs/ALGORITHM.md`).
+All; the Spectra, Board grid and Fleet summary tabs, re-fit overrides, Reject, export and the
+stale-results banner; see `docs/ALGORITHM.md`).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -515,6 +516,11 @@ read only the stored results.
   width ratio. Drift between the days: 0.4 % at 511 keV. Details in `docs/ALGORITHM.md` section 5.
 - **10.6 GUI.** pytest-qt, offscreen: open the stored results, navigate from the map, Reject/unreject,
   Fit Channel override and Revert, export contents, and the stale-results banner.
+
+  **Result (phase 7, 2026-09-24):** covered by `tests/gui/test_main_window.py`,
+  `tests/gui/test_review_workflow.py` and `tests/gui/test_session.py`; the forked System Map keeps
+  uvcorr's widget and model tests (`tests/gui/test_system_map*.py`), adapted to dcalib's statuses,
+  metrics and status-coloured cathodes. 204 GUI tests pass offscreen in about 8 s.
 
 ## 11. Measured facts about the test data (2026-09-24, exploratory scripts)
 

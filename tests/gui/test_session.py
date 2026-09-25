@@ -101,3 +101,80 @@ def test_batch_stop_and_busy(depth_cache: Path) -> None:
 def test_titles() -> None:
     assert ses.anode_title((1, 16, 0, 10)).startswith("n1 b16 A")
     assert "?" in ses.anode_title((1, 16, 0, 2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: re-fits, reverts, review, export, board grid
+# ---------------------------------------------------------------------------
+
+
+def _session(cache: Path) -> ses.DepthSession:
+    session = ses.DepthSession()
+    session.install(ses.open_cache(cache))
+    return session
+
+
+def test_refit_override_and_revert(results_cache: Path) -> None:
+    session = _session(results_cache)
+    assert session.refit_blocked_reason() == ""
+    request = session.refit_request(3, 16, ((0, 10),), DepthOptions(max_degree=1))
+    assert request.as_override and not request.is_board and "override" in request.describe_start()
+    outcome = session.run_refit(request)
+    assert outcome.n_saved == 1 and "1 override(s) stored" in outcome.describe()
+    assert session.apply_refit(outcome) == (STEEP,)
+    result = session.result(STEEP)
+    assert result is not None and result.options_source == "override" and result.degree == 1
+    assert session.has_override(STEEP) and session.override_keys(3, 16) == [STEEP]
+    assert session.options_for(STEEP) == DepthOptions(max_degree=1)
+    assert session.anode_data(STEEP).curve.degree == 1  # type: ignore[union-attr]
+    # A board re-fit with the batch options reverts instead.
+    request = session.refit_request(3, 16, None, DepthOptions())
+    assert not request.as_override and request.is_board
+    outcome = session.run_refit(request)
+    session.apply_refit(outcome)
+    assert outcome.n_deleted == 1 and not session.has_override(STEEP)
+    # Explicit revert.
+    session.apply_refit(
+        session.run_refit(session.refit_request(3, 16, ((0, 10),), DepthOptions(max_degree=1)))
+    )
+    assert session.revert([STEEP]) == 1 and session.revert([STEEP]) == 0
+    assert session.result(STEEP).options_source == "batch"  # type: ignore[union-attr]
+
+
+def test_refit_blocked(depth_cache: Path) -> None:
+    session = ses.DepthSession()
+    assert "open a cache" in session.refit_blocked_reason()
+    session.install(ses.open_cache(depth_cache))
+    assert "Fit All" in session.refit_blocked_reason()
+    with pytest.raises(ses.SessionError, match="Cannot re-fit"):
+        session.refit_request(3, 16)
+    with pytest.raises(ses.SessionError, match="Fit All first"):
+        session.set_review(STEEP, True)
+    with pytest.raises(ses.SessionError, match="Nothing to export"):
+        session.export_outputs(depth_cache.parent / "out")
+
+
+def test_review_and_export(results_cache: Path, tmp_path: Path) -> None:
+    session = _session(results_cache)
+    session.set_review(STEEP, True, "odd curve")
+    assert session.result(STEEP).review == "rejected"  # type: ignore[union-attr]
+    assert session.review(STEEP).note == "odd curve"  # type: ignore[union-attr]
+    summary = session.export_outputs(tmp_path / "export")
+    assert summary.n_lines == 1 and summary.n_rows == 6 and "Exported 1" in summary.describe()
+    from dcalib.io.dcc import read_dcc
+
+    assert set(read_dcc(summary.dcc_path)) == {AnodeKey(3, 15, 0, 9)}
+    # Persisted: a new session sees the rejection.
+    again = _session(results_cache)
+    assert again.result(STEEP).review == "rejected"  # type: ignore[union-attr]
+    again.set_review(STEEP, False)
+    assert again.review(STEEP) is None and _session(results_cache).review(STEEP) is None
+
+
+def test_board_grid_entries(results_cache: Path) -> None:
+    session = _session(results_cache)
+    entries = session.board_grid(3, 16)
+    assert len(entries) == 39 and [e.position for e in entries] == list(range(1, 40))
+    steep = next(e for e in entries if e.key == STEEP)
+    assert steep.result is not None and steep.curve is not None and "both" in steep.slices
+    assert sum(1 for e in entries if e.result is not None) == 5

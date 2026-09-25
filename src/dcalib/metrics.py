@@ -59,6 +59,7 @@ __all__ = [
     "PEAK_SEARCH",
     "MIN_METRIC_EVENTS",
     "PeakFit",
+    "WidthCrossings",
     "fit_photopeak",
     "fwhm_pct",
     "fwtm_pct",
@@ -66,6 +67,7 @@ __all__ = [
     "kde_spectrum",
     "poisson_deviance",
     "smooth",
+    "width_crossings",
     "width_pct",
 ]
 
@@ -553,39 +555,49 @@ def kde_spectrum(
     return centres, np.asarray(np.convolve(counts, kernel, mode="same"), dtype=np.float64)
 
 
-def width_pct(values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BANDWIDTH) -> float:
-    """Full width of the net photopeak at ``fraction`` of its height, in % of the peak.
+@dataclass(frozen=True)
+class WidthCrossings:
+    """Where :func:`width_pct` measured a width (for drawing it).
 
-    On :func:`kde_spectrum`: the maximum is searched in :data:`PEAK_SEARCH`
-    (the continuum of a weak 511 keV peak can be higher further down); the
-    continuum level ``B`` is the median of the spectrum
-    :data:`CONTINUUM_OFFSETS` below the peak; the crossings of ``B + fraction
-    * (max - B)`` are found by walking outwards from the maximum and
-    interpolating linearly between grid points. The peak position is the
-    maximum's grid point refined by a parabola through its neighbours.
-
-    Returns:
-        The width in %, or NaN below ``MIN_METRIC_EVENTS`` values, when the
-        continuum is above ``MAX_CONTINUUM_FRACTION`` of the maximum, or when
-        the low crossing is not above the continuum window (the tail merges
-        with the continuum).
+    Attributes:
+        left: Low crossing (x).
+        right: High crossing (x).
+        level: The level crossed (smoothed counts per grid step).
+        peak: Refined peak position (x).
+        continuum: The continuum level subtracted.
     """
+
+    left: float
+    right: float
+    level: float
+    peak: float
+    continuum: float
+
+    @property
+    def width_pct(self) -> float:
+        return 100.0 * (self.right - self.left) / self.peak
+
+
+def width_crossings(
+    values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BANDWIDTH
+) -> WidthCrossings | None:
+    """The crossings behind :func:`width_pct` (None where it gives NaN)."""
     v = np.asarray(values, dtype=np.float64)
     v = v[np.isfinite(v)]
     if len(v) < MIN_METRIC_EVENTS:
-        return math.nan
+        return None
     centres, density = kde_spectrum(v, bandwidth)
     search = np.flatnonzero((centres >= PEAK_SEARCH[0]) & (centres <= PEAK_SEARCH[1]))
     i = int(search[np.argmax(density[search])])
     top = density[i]
     if i == 0 or i == len(density) - 1:
-        return math.nan
+        return None
     peak_x = centres[i]
     far, near = CONTINUUM_OFFSETS
     window = (centres >= peak_x - far) & (centres <= peak_x - near)
     continuum = float(np.median(density[window])) if window.any() else 0.0
     if continuum > MAX_CONTINUUM_FRACTION * top:
-        return math.nan  # no peak standing out of the continuum
+        return None  # no peak standing out of the continuum
     level = continuum + fraction * (top - continuum)
     left = i
     while left > 0 and density[left] > level:
@@ -594,19 +606,41 @@ def width_pct(values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BAN
     while right < len(density) - 1 and density[right] > level:
         right += 1
     if density[right] > level or centres[left] < peak_x - near:
-        return math.nan
+        return None
 
     def cross(a: int, b: int) -> float:
         # density[a] <= level < density[b]
         da, db = density[a], density[b]
         return float(centres[a] + (level - da) * (centres[b] - centres[a]) / (db - da))
 
-    x_left = cross(left, left + 1)
-    x_right = cross(right, right - 1)
     denom = density[i - 1] - 2.0 * top + density[i + 1]
     shift = 0.5 * (density[i - 1] - density[i + 1]) / denom if denom < 0 else 0.0
     peak = float(peak_x + shift * (centres[1] - centres[0]))
-    return 100.0 * (x_right - x_left) / peak
+    return WidthCrossings(
+        cross(left, left + 1), cross(right, right - 1), float(level), peak, continuum
+    )
+
+
+def width_pct(values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BANDWIDTH) -> float:
+    """Full width of the net photopeak at ``fraction`` of its height, in % of the peak.
+
+    On :func:`kde_spectrum`: the maximum is searched in :data:`PEAK_SEARCH`
+    (the continuum of a weak 511 keV peak can be higher further down); the
+    continuum level ``B`` is the median of the spectrum
+    :data:`CONTINUUM_OFFSETS` below the peak; the crossings of ``B + fraction
+    * (max - B)`` are found by walking outwards from the maximum and
+    interpolating linearly between grid points (:func:`width_crossings`). The
+    peak position is the maximum's grid point refined by a parabola through
+    its neighbours.
+
+    Returns:
+        The width in %, or NaN below ``MIN_METRIC_EVENTS`` values, when the
+        continuum is above ``MAX_CONTINUUM_FRACTION`` of the maximum, or when
+        the low crossing is not above the continuum window (the tail merges
+        with the continuum).
+    """
+    crossings = width_crossings(values, fraction, bandwidth)
+    return crossings.width_pct if crossings is not None else math.nan
 
 
 def fwhm_pct(values: npt.ArrayLike, bandwidth: float = KDE_BANDWIDTH) -> float:

@@ -577,6 +577,12 @@ def _place(
             placement.unplaced.add(as_address(key))
 
 
+def _check_view_kind(channel: ChannelTuple, kind: str, view: ChannelView | None) -> None:
+    """Refuse a cathode status on an anode or an anode status on a cathode."""
+    if view is not None and view.is_cathode != (kind == "cathode"):
+        raise ValueError(f"{kind} {tuple(channel)} has a view with status {view.status!r}")
+
+
 def _seed_board(
     layout: _BoardLayout,
     node: int,
@@ -593,6 +599,7 @@ def _seed_board(
         for slot in layout.slots(kind):
             channel = slot.channel
             view = views.get(channel) if board_has_data else None
+            _check_view_kind(channel, kind, view)
             has_data = board_has_data and (
                 view is not None or data_channels is None or channel in data_channels
             )
@@ -735,7 +742,8 @@ def build_system_map(
         carry results or data, and the sorted unplaced view keys.
 
     Raises:
-        ValueError: If ``color_mode`` is unknown.
+        ValueError: If ``color_mode`` is unknown, or a view's status does not
+            fit its electrode (a cathode status on an anode or the reverse).
     """
     check_color_mode(color_mode)
     emap = electrode_map if electrode_map is not None else default_electrode_map()
@@ -859,6 +867,9 @@ def update_system_map(
 
     Returns:
         A new model (``model`` is not modified).
+
+    Raises:
+        ValueError: If a view's status does not fit its electrode.
     """
     emap = electrode_map if electrode_map is not None else default_electrode_map()
     lookup = cast(Mapping[ChannelTuple, ChannelView], changed)
@@ -895,6 +906,7 @@ def update_system_map(
             for cell in board_cells.cells(kind):
                 new_view = updates.get(cell.channel)
                 if new_view is not None:
+                    _check_view_kind(cell.channel, kind, new_view)
                     category = classify_view(new_view, True, informational)
                     seeds.append(
                         _Seed(

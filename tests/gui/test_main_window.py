@@ -11,6 +11,7 @@ from pytestqt.qtbot import QtBot
 from dcalib.channels import AnodeKey
 from dcalib.gui.depth_view import DepthDisplay
 from dcalib.gui.main import main as gui_main
+from dcalib.gui.window import TAB_TITLES
 from tests.gui.conftest import WAIT_MS, MakeWindow, wait_open
 
 STEEP = AnodeKey(3, 16, 0, 10)
@@ -38,6 +39,7 @@ def test_open_with_results_and_browse_from_map(
     wait_open(qtbot, window)
     assert not dialogs.errors
     assert "2 corrected" in window.status_message()
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == list(TAB_TITLES)
     # The first anode is shown at once.
     assert window.depth_view.data is not None and window.depth_view.data.key == CONCAVE
     assert "corrected" in window.system_map.summary_label.text()

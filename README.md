@@ -9,11 +9,10 @@ legacy Dcalib layout plus a `depth_summary.csv`. A PyQt6/pyqtgraph GUI (`dcalib-
 anode's depth curve and before/after spectra, re-fits channels with other options and rejects bad
 corrections. It is a separate package built on [adc2kev](../adc2kev-python), like `uvcorr`.
 
-> Status: phases 0-6 of [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md)
-> are implemented: `dcalib process` and `dcalib legacy` work, and the GUI browses the results
-> (System Map, Depth tab, Fit Inspector, Fit All); re-fits, review and export arrive in phase 7. The
-> algorithm, its deviations from the plan and the full-system census are in
-> [`docs/ALGORITHM.md`](docs/ALGORITHM.md).
+> Status: phases 0-7 of [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md)
+> are implemented: `dcalib process` and `dcalib legacy` work, and the GUI browses, re-fits, reviews
+> and exports the results. The algorithm, its deviations from the plan and the full-system census
+> are in [`docs/ALGORITHM.md`](docs/ALGORITHM.md).
 
 ## Install
 
@@ -54,8 +53,13 @@ dcalib-gui data.cache.h5 [--results PATH] [--kev calibration.kev] [--workers N]
 
 Opens the cache and the results stored in its sidecar. Click an anode on the System Map (or use
 the selectors, Prev/Next or Ctrl+Left/Right) to see its photopeak against C/A before and after the
-correction in the Depth tab, and every result field in the Fit Inspector. *Process > Fit All*
-(Ctrl+F) runs the whole analysis with the control band's options and stores it.
+correction in the Depth tab, its 511 and 662 keV spectra in the Spectra tab and every result field
+in the Fit Inspector; the Board grid and Fleet summary tabs show a board and the whole detector at
+a glance. *Process > Fit All* (Ctrl+F) runs the whole analysis with the control band's options;
+*Fit Channel* (Ctrl+R) and *Fit Board* (Ctrl+Shift+R) store per-anode overrides, *Revert* goes
+back to the batch result, *Reject* keeps an anode out of the `.dcc`, and *File > Export*
+(Ctrl+E) writes the `.dcc` and `depth_summary.csv`. Everything is saved in the sidecar as you go;
+a banner warns when the stored results no longer match the cache or its calibrations.
 
 ## Development
 

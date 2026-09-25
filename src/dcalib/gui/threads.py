@@ -32,6 +32,8 @@ from dcalib.gui.session import (
     BatchOutcome,
     DepthSession,
     OpenedCache,
+    RefitOutcome,
+    RefitRequest,
     SessionError,
     open_cache,
 )
@@ -45,6 +47,7 @@ __all__ = [
     "AnodeDataThread",
     "FitAllThread",
     "OpenThread",
+    "RefitThread",
     "error_text",
 ]
 
@@ -150,6 +153,20 @@ class FitAllThread(_WorkerThread):
             progress=lambda done, total: self.progress.emit(done, total),
             stop_flag=self._stop,
         )
+
+
+class RefitThread(_WorkerThread):
+    """Runs :meth:`DepthSession.run_refit`; ``finished(RefitOutcome)``."""
+
+    def __init__(
+        self, session: DepthSession, request: RefitRequest, parent: QObject | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._session = session
+        self._request = request
+
+    def _work(self) -> RefitOutcome:
+        return self._session.run_refit(self._request, stop_flag=self._stop)
 
 
 class AnodeDataThread(QThread):

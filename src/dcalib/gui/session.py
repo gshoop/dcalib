@@ -18,14 +18,35 @@ module uses ``QColor``, a value type that needs no ``QApplication``), so the
 session is unit tested without widgets.
 
 Threads. Opening a cache (:func:`open_cache`), Fit All
-(:meth:`DepthSession.run_batch`) and loading an anode's data
+(:meth:`DepthSession.run_batch`), a channel or board re-fit
+(:meth:`DepthSession.run_refit`) and loading an anode's data
 (:meth:`DepthSession.anode_data`, which may read and cluster a board) block
 and run in the worker threads of :mod:`dcalib.gui.threads`; everything that
 changes the session's state (:meth:`DepthSession.install`,
-:meth:`DepthSession.apply_batch`) runs on the GUI thread. Only one Fit All
-runs at a time (:class:`SessionBusyError`). The board LRU and every sidecar
-access hold one lock, since in-process HDF5 read and write handles on one
-file conflict. The cache itself is only ever read.
+:meth:`DepthSession.apply_batch`, :meth:`DepthSession.apply_refit`, the
+reverts and the review) runs on the GUI thread. A Fit All and a re-fit store
+results, so only one of them runs at a time (:class:`SessionBusyError`). The
+board LRU and every sidecar access hold one lock, since in-process HDF5 read
+and write handles on one file conflict. The cache itself is only ever read.
+
+Re-fits and overrides (plan D10). A channel or board is re-fitted with the
+control band's options. When they fit like the stored batch options
+(:func:`~dcalib.options.same_fit`), the re-fit reproduces the batch, so the
+anodes' overrides are deleted instead (revert to batch); otherwise the new
+results are stored as overrides, one sidecar write for a whole board. The
+stored batch must be current: re-fits of stale results are refused (run Fit
+All first). A write checks that the stored batch is still the one the session
+loaded (``expected_created_at``), so a batch replaced by another process is
+never extended with overrides.
+
+Review (plan D10). :meth:`DepthSession.set_review` rejects or restores an
+anode (with an optional note) in the sidecar's review table; the exports
+leave rejected anodes out of the ``.dcc``. Reviews survive new batches and
+stale results (they are human decisions keyed by channel).
+
+Exports: :meth:`DepthSession.export_outputs` writes ``<name>.dcc`` and
+``depth_summary.csv`` of the merged results (overrides and review applied)
+atomically.
 """
 
 from __future__ import annotations
@@ -35,7 +56,8 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -43,11 +65,14 @@ import numpy as np
 import numpy.typing as npt
 from adc2kev.cache import CalibrationCache
 
+from dcalib import __version__
 from dcalib.analysis import (
+    OPTIONS_OVERRIDE,
     AnodeResult,
     BoardAnalysis,
     SliceRow,
     analyze_all,
+    analyze_board,
     default_workers,
     merge_results,
     slices_from_rows,
@@ -59,16 +84,25 @@ from dcalib.calib import (
     event_energies,
     load_calibrations,
 )
-from dcalib.channels import AnodeKey, anode_channels, cathode_channels, electrode_label
+from dcalib.channels import (
+    AnodeKey,
+    anode_channels,
+    anodes_by_strip,
+    cathode_channels,
+    electrode_label,
+)
 from dcalib.depth import Curve, Slices, fit_curve
 from dcalib.events import BoardEvents, build_board_events, list_boards
 from dcalib.gui._system_map_model import ChannelView
 from dcalib.gui.map_colors import CATHODE_CALIBRATED, CATHODE_UNCALIBRATED
-from dcalib.options import DCC_ENERGY_KEV, DepthOptions
+from dcalib.io import cache_stem
+from dcalib.io.export import output_paths, prepare_output_dir, write_outputs
+from dcalib.options import DCC_ENERGY_KEV, REVIEW_REJECTED, DepthOptions, same_fit
 from dcalib.results import (
     CacheIdentity,
     ResultsError,
     ResultsFile,
+    ReviewEntry,
     StoredResults,
     Validity,
     cache_identity,
@@ -81,8 +115,12 @@ __all__ = [
     "DEFAULT_BOARD_CACHE_SIZE",
     "AnodeData",
     "BatchOutcome",
+    "BoardGridEntry",
     "DepthSession",
+    "ExportSummary",
     "OpenedCache",
+    "RefitOutcome",
+    "RefitRequest",
     "SessionBusyError",
     "SessionError",
     "anode_title",
@@ -315,6 +353,94 @@ class BatchOutcome:
         if self.n_dropped_overrides:
             text += f"; {self.n_dropped_overrides} override(s) dropped"
         return text
+
+
+@dataclass(frozen=True)
+class RefitRequest:
+    """A channel or board re-fit, decided on the GUI thread.
+
+    Attributes:
+        node: Node of the anodes.
+        board: Board of the anodes.
+        anodes: The ``(rena, channel)`` re-fitted (one, or every anode of the
+            board with a result).
+        options: The options to fit with.
+        as_override: Store the results as overrides (the options differ from
+            the batch's); otherwise the anodes are reverted to the batch.
+        created_at: The stored batch's ``created_at`` the request was made for.
+    """
+
+    node: int
+    board: int
+    anodes: tuple[tuple[int, int], ...]
+    options: DepthOptions
+    as_override: bool
+    created_at: str
+
+    @property
+    def keys(self) -> tuple[AnodeKey, ...]:
+        return tuple(AnodeKey(self.node, self.board, r, c) for r, c in self.anodes)
+
+    @property
+    def is_board(self) -> bool:
+        return len(self.anodes) != 1
+
+    def describe_start(self) -> str:
+        what = f"board n{self.node} b{self.board}" if self.is_board else anode_title(self.keys[0])
+        how = "as an override" if self.as_override else "with the batch options (revert)"
+        return f"Re-fitting {what} {how}..."
+
+
+@dataclass(frozen=True)
+class RefitOutcome:
+    """A finished re-fit and what it stored."""
+
+    request: RefitRequest
+    results: tuple[AnodeResult, ...]
+    n_saved: int
+    n_deleted: int
+    stored: StoredResults | None
+
+    def describe(self) -> str:
+        request = self.request
+        what = (
+            f"board n{request.node} b{request.board}"
+            if request.is_board
+            else anode_title(request.keys[0])
+        )
+        n_ok = sum(1 for r in self.results if r.ok)
+        if request.as_override:
+            return f"Re-fitted {what}: {self.n_saved} override(s) stored, {n_ok} corrected"
+        return f"Re-fitted {what} with the batch options: {self.n_deleted} override(s) reverted"
+
+
+@dataclass(frozen=True)
+class ExportSummary:
+    """What an export wrote."""
+
+    dcc_path: Path
+    csv_path: Path
+    n_lines: int
+    n_rows: int
+    stale: bool
+
+    def describe(self) -> str:
+        text = (
+            f"Exported {self.n_lines:,} corrected anodes to {self.dcc_path.name} and "
+            f"{self.n_rows:,} rows to {self.csv_path.name} in {self.dcc_path.parent}"
+        )
+        return text + " (from stale results)" if self.stale else text
+
+
+@dataclass(frozen=True)
+class BoardGridEntry:
+    """One cell of the Board grid tab: an anode in physical strip order."""
+
+    position: int
+    key: AnodeKey
+    result: AnodeResult | None
+    slices: dict[str, Slices]
+    curve: Curve | None
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +760,214 @@ class DepthSession:
         self._set_stored(outcome.stored, validity)
         self._options = outcome.options
         return self.views()
+
+    # -- re-fits and overrides --------------------------------------------------
+
+    def refit_blocked_reason(self) -> str:
+        """Why a re-fit cannot start now ("" when it can)."""
+        if not self.is_open:
+            return "open a cache first"
+        if self._stored is None:
+            return "run Fit All first: there are no batch results to override"
+        if self.stale:
+            return "the stored results are stale: run Fit All first"
+        if self.busy:
+            return f"{self._busy} is running"
+        return ""
+
+    def refit_request(
+        self,
+        node: int,
+        board: int,
+        anodes: tuple[tuple[int, int], ...] | None = None,
+        options: DepthOptions | None = None,
+    ) -> RefitRequest:
+        """Decide a re-fit (GUI thread): the anodes (default: the board's) and override or revert.
+
+        Raises:
+            SessionError: If a re-fit cannot start (see :meth:`refit_blocked_reason`).
+        """
+        reason = self.refit_blocked_reason()
+        if reason:
+            raise SessionError(f"Cannot re-fit: {reason}")
+        assert self._stored is not None
+        opts = options if options is not None else self._options
+        if anodes is None:
+            anodes = tuple((k.rena, k.channel) for k in self.anodes_on_board(node, board))
+        return RefitRequest(
+            node,
+            board,
+            tuple(anodes),
+            opts,
+            as_override=not same_fit(opts, self._stored.options),
+            created_at=self._stored.created_at,
+        )
+
+    def run_refit(self, request: RefitRequest, stop_flag: StopFlag | None = None) -> RefitOutcome:
+        """Re-fit and store (worker thread; see the module docstring)."""
+        opened = self._require_open()
+        with self._exclusive("A re-fit"):
+            saved = deleted = 0
+            results: tuple[AnodeResult, ...] = ()
+            sidecar = ResultsFile(opened.results_path)
+            if request.as_override:
+                events = self.board_events(request.node, request.board)
+                out = analyze_board(
+                    None,
+                    request.node,
+                    request.board,
+                    opened.calibrations.board_lut(request.node, request.board),
+                    request.options,
+                    events=events,
+                    anodes=request.anodes,
+                    options_source=OPTIONS_OVERRIDE,
+                    stop_flag=stop_flag,
+                )
+                results = tuple(out.results)
+                by_key: dict[AnodeKey, list[SliceRow]] = {}
+                for row in out.slices:
+                    by_key.setdefault(row.key, []).append(row)
+                with self._io_lock:
+                    try:
+                        saved, deleted = sidecar.replace_overrides(
+                            [(r, by_key.get(r.key, []), request.options) for r in results],
+                            expected_created_at=request.created_at,
+                        )
+                    except (ResultsError, OSError) as exc:
+                        raise SessionError(f"The re-fit could not be stored: {exc}") from exc
+            else:
+                with self._io_lock:
+                    try:
+                        saved, deleted = sidecar.replace_overrides(
+                            delete=request.keys, expected_created_at=request.created_at
+                        )
+                    except (ResultsError, OSError) as exc:
+                        raise SessionError(f"The revert could not be stored: {exc}") from exc
+            with self._io_lock:
+                stored = sidecar.load()
+        return RefitOutcome(request, results, saved, deleted, stored)
+
+    def apply_refit(self, outcome: RefitOutcome) -> tuple[AnodeKey, ...]:
+        """Install a finished re-fit (GUI thread); returns the anodes that changed."""
+        self._set_stored(outcome.stored, self._validity)
+        return outcome.request.keys
+
+    def has_override(self, key: AnodeKey) -> bool:
+        return (
+            self._stored is not None and not self.stale and AnodeKey(*key) in self._stored.overrides
+        )
+
+    def override_keys(self, node: int | None = None, board: int | None = None) -> list[AnodeKey]:
+        if self._stored is None or self.stale:
+            return []
+        return [
+            k
+            for k in sorted(self._stored.overrides)
+            if (node is None or k.node == node) and (board is None or k.board == board)
+        ]
+
+    def revert(self, keys: tuple[AnodeKey, ...] | list[AnodeKey]) -> int:
+        """Delete the overrides of ``keys`` (GUI thread); returns how many were deleted."""
+        if self._stored is None or not keys:
+            return 0
+        opened = self._require_open()
+        with self._io_lock:
+            try:
+                _, deleted = ResultsFile(opened.results_path).replace_overrides(
+                    delete=keys, expected_created_at=self._stored.created_at
+                )
+            except (ResultsError, OSError) as exc:
+                raise SessionError(f"The revert could not be stored: {exc}") from exc
+        if deleted:
+            overrides = {k: v for k, v in self._stored.overrides.items() if k not in set(keys)}
+            self._set_stored(replace(self._stored, overrides=overrides), self._validity)
+        return deleted
+
+    # -- review ------------------------------------------------------------------
+
+    def review(self, key: AnodeKey) -> ReviewEntry | None:
+        return self._stored.review.get(AnodeKey(*key)) if self._stored is not None else None
+
+    def set_review(
+        self, key: AnodeKey | tuple[int, int, int, int], rejected: bool, note: str = ""
+    ) -> None:
+        """Reject (``rejected``) or restore an anode in the sidecar (GUI thread).
+
+        Raises:
+            SessionError: Without stored results, or if the sidecar cannot be written.
+        """
+        if self._stored is None:
+            raise SessionError("Run Fit All first: there are no results to review")
+        opened = self._require_open()
+        anode = AnodeKey(*(int(v) for v in key))
+        state = REVIEW_REJECTED if rejected else ""
+        with self._io_lock:
+            try:
+                ResultsFile(opened.results_path).set_review(anode, state, note)
+            except (ResultsError, OSError, ValueError) as exc:
+                raise SessionError(f"The review could not be stored: {exc}") from exc
+        review = dict(self._stored.review)
+        if rejected:
+            review[anode] = ReviewEntry(state, datetime.now().isoformat(timespec="seconds"), note)
+        else:
+            review.pop(anode, None)
+        self._set_stored(replace(self._stored, review=review), self._validity)
+
+    # -- exports -------------------------------------------------------------------
+
+    def export_name(self) -> str:
+        return cache_stem(self._require_open().cache_path)
+
+    def export_outputs(self, directory: str | Path) -> ExportSummary:
+        """Write ``<name>.dcc`` and ``depth_summary.csv`` of the merged results.
+
+        Raises:
+            SessionError: Without results, or if the files cannot be written.
+        """
+        opened = self._require_open()
+        if not self._merged:
+            raise SessionError("Nothing to export: run Fit All first")
+        name = self.export_name()
+        rows = self.merged_results()
+        try:
+            prepare_output_dir(directory, [p.name for p in output_paths(directory, name)])
+            dcc, csv_path = write_outputs(
+                directory,
+                name,
+                rows,
+                [
+                    ("cache", opened.cache_path.resolve()),
+                    ("calibration", opened.calibrations.source),
+                    ("calibration_fingerprint", opened.calibrations.fingerprint),
+                    ("options", self._stored.options.to_json() if self._stored else ""),
+                    ("results", opened.results_path.resolve()),
+                    ("dcalib_version", __version__),
+                ],
+            )
+        except OSError as exc:
+            raise SessionError(f"The export failed: {exc}") from exc
+        return ExportSummary(
+            dcc, csv_path, sum(1 for r in rows if r.exported), len(rows), self.stale
+        )
+
+    # -- board grid ------------------------------------------------------------------
+
+    def board_grid(self, node: int, board: int) -> list[BoardGridEntry]:
+        """The board's 39 anodes in physical strip order, from the stored results only."""
+        entries = []
+        for position, (rena, channel) in enumerate(anodes_by_strip(board), start=1):
+            key = AnodeKey(node, board, rena, channel)
+            result = self._merged.get(key)
+            entries.append(
+                BoardGridEntry(
+                    position,
+                    key,
+                    result,
+                    self.slices_for(key),
+                    _curve_from_result(result) if result is not None else None,
+                )
+            )
+        return entries
 
     # -- text ------------------------------------------------------------------
 

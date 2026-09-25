@@ -158,9 +158,11 @@ ANODE_CATEGORIES: tuple[str, ...] = (
 CATHODE_CATEGORIES: tuple[str, ...] = (
     CATEGORY_CATHODE_CALIBRATED,
     CATEGORY_CATHODE_UNCALIBRATED,
+    CATEGORY_NOT_FITTED,
     CATEGORY_NO_DATA,
 )
-"""Categories a cathode cell can take."""
+"""Categories a cathode cell can take (``not_fitted``: a board with data but no
+calibration status for the cathode)."""
 
 CATEGORIES: tuple[str, ...] = (
     *ANODE_CATEGORIES[:-1],

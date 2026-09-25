@@ -1,10 +1,10 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-4 are implemented (skeleton; options, channels, calibrations and event building;
+user. Phases 0-5 are implemented (skeleton; options, channels, calibrations and event building;
 the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics;
-the analysis driver, sidecar results, exports, `dcalib process` and the full-system census, see
-`docs/ALGORITHM.md`).
+the analysis driver, sidecar results, exports, `dcalib process` and the full-system census; the
+held-out validation; see `docs/ALGORITHM.md`).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -506,6 +506,12 @@ read only the stored results.
   **Done when** the report exists and the accepted anodes show a non-negative held-out median gain
   consistent with `cv_gain`, or the gate defaults are retuned until they do. A day of gain drift
   can shift both the before and after numbers; the comparison is paired, so drift largely cancels.
+
+  **Result (phase 5, 2026-09-24):** 2,605 corrected anodes with held-out events; held-out median
+  alignment gain 3.6 % against a median `cv_gain` of 4.3 % (correlation 0.74); FWHM 6.20 → 5.92 %
+  at 511 keV and 5.17 → 4.89 % at 662 keV (median ratios 0.969 and 0.961, in sample 0.963 and
+  0.955). The 11-12 % of anodes that look worse are within the 2 % per-anode noise of the paired
+  width ratio. Drift between the days: 0.4 % at 511 keV. Details in `docs/ALGORITHM.md` section 5.
 - **10.6 GUI.** pytest-qt, offscreen: open the stored results, navigate from the map, Reject/unreject,
   Fit Channel override and Revert, export contents, and the stale-results banner.
 

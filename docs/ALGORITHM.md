@@ -235,8 +235,8 @@ Flags: `partial_cathode_coverage` 1,045 (131 of them still `ok`), `source_incons
   FWHM 511 keV 6.22 → 5.90 (0.875 / 0.963 / 1.004), FWHM 662 keV 5.21 → 4.87 (0.839 / 0.955 /
   0.996), FWTM 511 keV 11.48 → 11.05 (0.897 / 0.972 / 1.008), FWTM 662 keV 10.01 → 9.54 (0.872 /
   0.967 / 1.006). In sample, 6.6 % of the `ok` anodes have a 511 keV FWHM more than 1 % wider
-  after the correction (4.1 % at 662 keV). Part of this is the width measurement's noise; the
-  held-out validation (phase 5) measures it properly.
+  after the correction (4.1 % at 662 keV). This is the width measurement's noise: section 5
+  shows that a single anode's paired FWHM ratio scatters by about 2 %.
 - **Scale (open item O3).** The median photopeak position of the exported spectra is 0.9984
   (511 keV) and 0.9990 (662 keV) for corrected anodes, and 0.9976 / 0.9980 for omitted ones: the
   offset between the two groups is about 0.1 %, well inside the ≲ 0.5 % the plan accepts.
@@ -253,3 +253,46 @@ Flags: `partial_cathode_coverage` 1,045 (131 of them still `ok`), `source_incons
 
 Of the 31 s, loading and fingerprinting the calibrations takes 1.1 s, writing the outputs and the
 sidecar 0.2 s.
+
+## 5. Held-out validation (phase 5, plan 10.5)
+
+`scripts/validate_holdout.py` applies the 2026-09-11 run (the `.dcc` and the cache's calibrations
+of section 4.3) to the raw acquisitions of the previous day
+(`sources/ge/data_20260910_120628.dat`, 208M events, and `sources/cs/data_20260910_121135.dat`).
+It parses them into adc2kev `DiagnosticCache`s in its work directory (65 s per file), builds the
+1A1C events with `dcalib.events` and measures every anode of the in-sample CSV on these events,
+before and after the in-sample correction:
+
+```bash
+venv/bin/python scripts/validate_holdout.py --run OUT_OF_DCALIB_PROCESS --workers 8
+# writes .scratch/holdout/holdout_summary.csv and holdout_report.md (14 s with the caches built)
+```
+
+2,605 of the 2,668 corrected anodes have held-out events. Paired widths (the same held-out
+events before and after):
+
+| Metric | Median before | Median after | Ratio after/before p10 / median / p90 | In-sample median ratio |
+|---|---|---|---|---|
+| FWHM 511 keV | 6.20 % | 5.92 % | 0.880 / 0.969 / 1.016 | 0.963 |
+| FWTM 511 keV | 11.54 % | 11.10 % | 0.897 / 0.976 / 1.012 | 0.972 |
+| FWHM 662 keV | 5.17 % | 4.89 % | 0.849 / 0.961 / 1.011 | 0.955 |
+| FWTM 662 keV | 10.01 % | 9.56 % | 0.874 / 0.969 / 1.015 | 0.967 |
+
+- **Gain.** The alignment gain (the `cv_gain` estimator, with the in-sample curve on the held-out
+  events) has p10 0.5 %, median 3.6 % and p90 12.8 %, and is negative for 4.3 % of the corrected
+  anodes. The in-sample `cv_gain` of the same anodes has a median of 4.3 %: it is slightly
+  optimistic (median difference −0.6 points) and correlates with the held-out gain at 0.74. The
+  held-out width ratios are within a point of the in-sample ones.
+- **Anodes that look worse.** 11-12 % of the corrected anodes have a held-out width more than 1 %
+  larger after the correction. Bootstrapping 73 corrected anodes of five boards gives a paired
+  FWHM ratio noise of 2.2 % per anode (p90 6.7 %), so at the median ratio about 15 % of the
+  anodes would exceed 1.01 from the measurement noise alone: the "worse" anodes are consistent
+  with noise, not with harmful corrections.
+- **Drift.** With the 2026-09-11 calibration, the uncorrected held-out photopeaks sit at 0.9961
+  (511 keV) and 0.9983 (662 keV) E/E0: the gains drifted by about 0.4 % and 0.2 % between the
+  days. The paired comparison is insensitive to it (open item O9).
+
+**Conclusion (plan 10.5 done when).** The corrected anodes have a positive held-out median gain
+(3.6 % in the alignment measure; FWHM −3.1 % at 511 keV and −3.9 % at 662 keV) that is consistent
+with `cv_gain` (4.3 %) and with the in-sample widths, so the gate defaults were not retuned
+further.

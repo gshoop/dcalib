@@ -1,7 +1,7 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Nothing is implemented yet.
+user. Phases 0-1 are implemented (skeleton; options, channels, calibrations and event building).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -169,7 +169,10 @@ Per board and per source (file_id 0 or 1):
    CTS.
 3. **Greedy clustering** (a numba loop): a hit starts a new cluster when `cts > anchor_cts + 48`;
    otherwise it joins the current cluster (inclusive, like extractData). The window is
-   `DepthOptions.cts_window` (default 48).
+   `DepthOptions.cts_window` (default 48). Unlike extractData, which anchors its windows on the
+   time-sorted hits of the whole system and then groups each window by (node, board), the windows
+   are anchored per board, since the cache stores every board separately. The two agree unless
+   another board's hit anchors a window between a board's anode and cathode hits.
 4. Keep the clusters with exactly one anode hit and one cathode hit. The output is a
    `BoardEvents` structure of parallel arrays, one row per event: `source` (int8), anode `rena`,
    `channel`, `pha`, cathode `rena`, `channel`, `pha`, and `dcts`. Energies are **not** stored, so
@@ -480,24 +483,26 @@ read only the stored results.
 ## 11. Measured facts about the test data (2026-09-24, exploratory scripts)
 
 Measured on the full-system cache and `calibration.kev` with ad-hoc versions of sections 5.1-5.3.
-Phase 1 must re-measure them with the real code.
+The rows marked **(P1)** were re-measured in phase 1 with `dcalib.events` and `dcalib.calib` (cache
+calibrations, one process, page cache warm unless stated; `tests/test_realdata.py` pins the n1 b17
+and n5 b22 values).
 
 | Quantity | Value |
 |----------|-------|
-| Boards with events | 156 |
+| Boards with events **(P1)** | 156 groups under `/coincidences` (524.7M hits); 146 have at least one 1A1C event, 141 at least 1,000. Some groups are nearly empty (1-4 hits). 97.5M 1A1C events in total |
 | Cathodes with a valid keV calibration | 692 / 1248. adc2kev's 511 keV `smart_cathode_edge` fit fails on 230 (228 "No linear leading-edge region found", 2 "Leading flank too short"), and 302 cathodes have no fit at all |
 | Ge cathode events on calibrated cathodes | 67.3 %; **24 boards 0 %**, 43 boards < 50 % |
-| Board load (`load_board_event_arrays`) | 0.16-0.95 s (cold vs page cache) |
-| Clustering + 1A1C selection | 0.01-0.19 s per board per source (numba) |
-| 1A1C share of the clusters | 58-71 % (n1 b17, n5 b22). The next largest class is 2A1C (≈ 14 % on n1 b17) |
-| Anode-cathode \|ΔCTS\| within 1A1C | median 0, p99 ≈ 23, max 48; 31-58 % of the pairs have different trigger numbers, so CTS clustering (not trigger numbers) is needed |
-| Pooled Ge+Cs photopeak 1A1C events per anode | n1 b17: min 6,125, median 7,803; n5 b22: min 715, median 1,138 |
+| Board load (`read_board_hits`) **(P1)** | Boards with > 10⁵ hits: median 0.18 s, p90 0.71 s; n1 b17 (2.9M hits) 0.12-0.15 s warm. A cold page cache adds up to ≈ 5 s on the first read of a board. All 156 boards: 49 s in one process |
+| Clustering + 1A1C selection **(P1)** | Both sources of a board: median 0.08 s, p90 0.21 s, max 0.36 s (n2 b16, 12.2M hits); 14.6 s for all boards (numba, compiled once and cached) |
+| 1A1C share of the clusters **(P1)** | n1 b17: 65.5 % (Ge), 71.0 % (Cs); n5 b22: 58.4 %, 66.1 %. Fleet median 46 % (Ge), 58 % (Cs), p10 10-14 %: some boards have many 1A2C clusters (n1 b15: 41 % of its Ge clusters). The 2A1C share is 14.3 % (Ge) on n1 b17, fleet median 16 % |
+| Anode-cathode \|ΔCTS\| within 1A1C **(P1)** | median 0, p99 23 (n1 b17) / 20 (n5 b22), max 48; 31-58 % of the pairs have different trigger numbers, so CTS clustering (not trigger numbers) is needed |
+| Pooled Ge+Cs photopeak 1A1C events per calibrated anode **(P1)** | x ∈ [0.75, 1.12], r ∈ [0, 1.3], calibrated cathode: n1 b17: min 6,124, median 7,788 (25 calibrated anodes); n5 b22: min 715, median 1,137 (37) |
 | Depth effect (198 anodes, 8 equal-count slices) | photopeak spread across r: median **1.7 %** of E0, p90 8 %; lowest-r slice at 0.996 E0, highest at 0.984 E0 (median); per-slice fit error ≈ 0.2 % |
 | Photopeak pairs with C/A > 1 | ≈ 11 %, with the peak at 0.964 (Ge) / 0.975 (Cs) E0. The legacy gate drops them |
 | Ge vs Cs, board-pooled, in E/E0 | agree to ≤ 0.4 % for r in [0.2, 0.9]; ≈ 1 % in the lowest and highest bins |
 | Uncorrected Gaussian-core FWHM | median 5.7 % (p10 4.6 %, p90 8.2 %) |
 | Legacy-style argmax + pol2 on one well-populated anode | FWHM 5.2 % → 6.3 % (worse): fitting noise at the 6 keV bin scale |
-| Calibrations: cache vs `calibration.kev` | 5,492 vs 5,491 valid channels, 0 value differences |
+| Calibrations: cache vs `calibration.kev` **(P1)** | 5,492 vs 5,491 valid channels (692 cathodes, 4,800 anodes in the cache); the extra one is n5 b21 r0 ch25. The values agree to the 6 decimals `.kev` prints, so the two sources have different fingerprints. Loading the cache's calibrations takes 1.4-1.6 s |
 | Legacy C++ on Linux | Builds against `~/root-install` in about 1 s and runs |
 
 ## 12. Phases

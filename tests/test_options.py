@@ -13,8 +13,9 @@ class TestDepthOptions:
     def test_defaults_are_the_plan_values(self) -> None:
         d = DepthOptions()
         assert (d.x_lo, d.x_hi, d.r_lo, d.r_hi) == (0.75, 1.12, 0.0, 1.3)
-        assert (d.min_pairs, d.per_slice, d.min_slices, d.max_slices) == (800, 400, 4, 12)
-        assert (d.max_degree, d.p_degree, d.min_gain, d.max_source_loss) == (2, 0.01, 0.01, 0.005)
+        assert (d.min_pairs, d.per_slice, d.min_slices, d.max_slices) == (500, 400, 4, 12)
+        assert (d.max_degree, d.p_degree, d.min_gain, d.max_source_loss) == (2, 0.01, 0.01, 0.01)
+        assert (d.coverage_r_lo, d.coverage_r_hi) == (0.25, 0.95)
         assert d.cts_window == 48 and d.sources == "both" and not d.concave_only
         assert (d.window_lo_sigma, d.window_hi_sigma) == (2.0, 3.0)  # phase 3 retune
         assert d.is_default() and d.source_ids == (0, 1)

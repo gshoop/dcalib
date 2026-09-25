@@ -117,7 +117,7 @@ class TestWidths:
 
     def test_nan_cases(self) -> None:
         assert math.isnan(metrics.fwhm_pct(np.ones(metrics.MIN_METRIC_EVENTS - 1)))
-        # A peak so wide that the tenth-maximum crossings leave the grid.
+        # A peak so wide that it does not stand out of its "continuum".
         assert math.isnan(metrics.fwtm_pct(_gauss_sample(5000, 1.0, 0.2, 2)))
 
     def test_tail_widens_fwtm_more_than_fwhm(self) -> None:
@@ -125,5 +125,16 @@ class TestWidths:
         core = rng.normal(1.0, 0.024, 20_000)
         tail = 1.0 - rng.exponential(0.05, 4_000) + rng.normal(0, 0.024, 4_000)
         both = np.concatenate([core, tail])
-        assert metrics.fwtm_pct(both) / metrics.fwtm_pct(core) > 1.1
-        assert metrics.fwhm_pct(both) / metrics.fwhm_pct(core) < 1.1
+        fwtm_ratio = metrics.fwtm_pct(both) / metrics.fwtm_pct(core)
+        fwhm_ratio = metrics.fwhm_pct(both) / metrics.fwhm_pct(core)
+        assert fwtm_ratio > 1.04 and fwtm_ratio > fwhm_ratio
+
+    def test_continuum_is_subtracted(self) -> None:
+        # A flat continuum at 30 % of the peak over the whole range: a gross
+        # tenth-maximum would not exist, the net widths are those of the peak.
+        rng = np.random.default_rng(5)
+        peak = rng.normal(1.0, 0.024, 20_000)
+        continuum = rng.uniform(0.6, 1.3, 60_000)
+        both = np.concatenate([peak, continuum])
+        assert metrics.fwtm_pct(both) == pytest.approx(metrics.fwtm_pct(peak), rel=0.05)
+        assert metrics.fwhm_pct(both) == pytest.approx(metrics.fwhm_pct(peak), rel=0.05)

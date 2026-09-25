@@ -1,15 +1,27 @@
-"""Tests of the ``dcalib`` command line (``legacy``; ``process`` arrives in phase 4)."""
+"""Tests of the ``dcalib`` command line: ``legacy`` and ``process``."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from dcalib import cli
+from dcalib.channels import AnodeKey
 from dcalib.io.dcc import read_dcc
-from dcalib.io.summary_csv import read_csv_rows
-from tests.synthetic_cache import BoardData, add_pairs, tie_pairs, write_cache, write_kev
+from dcalib.io.summary_csv import read_csv_rows, read_summary_csv
+from dcalib.options import DepthOptions
+from dcalib.results import ResultsFile
+from tests.conftest import DEPTH_BOARDS, UNCALIBRATED
+from tests.synthetic_cache import (
+    BoardData,
+    add_pairs,
+    depth_calibrations,
+    tie_pairs,
+    write_cache,
+    write_kev,
+)
 
 CALS = {
     (9, 16, 0, 10): (1.0, 0.0),  # identity anode
@@ -89,3 +101,132 @@ class TestLegacy:
         assert cli.main(["legacy", str(bogus), "--output-dir", out, *missing_kev]) == 2
         (tmp_path / "file").write_text("")
         assert cli.main(["legacy", str(bogus), "--output-dir", str(tmp_path / "file")]) == 2
+
+
+# ---------------------------------------------------------------------------
+# dcalib process
+# ---------------------------------------------------------------------------
+
+STEEP = AnodeKey(3, 16, 0, 10)
+CONCAVE = AnodeKey(3, 15, 0, 9)
+
+
+def _process(cache: Path, out: Path, *extra: str) -> int:
+    return cli.main(["process", str(cache), "--output-dir", str(out), "--workers", "1", *extra])
+
+
+class TestProcess:
+    def test_outputs_and_sidecar(
+        self, depth_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out"
+        assert _process(depth_cache, out) == cli.EXIT_OK
+        dcc = read_dcc(out / "data_20260911_124617.dcc")
+        assert set(dcc) == {STEEP, CONCAVE}
+        rows = read_summary_csv(out / "depth_summary.csv")
+        assert len(rows) == 6 and {r.status for r in rows} >= {"ok", "too_few_events"}
+        sidecar = ResultsFile(depth_cache.with_name("data_20260911_124617.depth.h5"))
+        stored = sidecar.load()
+        assert stored is not None and len(stored.results) == 6
+        stdout = capsys.readouterr().out
+        assert "status:     ok 2," in stdout and "overrides:  0 applied" in stdout
+        assert "Time:" in stdout
+
+    def test_results_option(self, depth_cache: Path, tmp_path: Path) -> None:
+        results = tmp_path / "elsewhere.depth.h5"
+        assert _process(depth_cache, tmp_path / "out", "--results", str(results)) == 0
+        assert results.is_file()
+        assert not depth_cache.with_name("data_20260911_124617.depth.h5").exists()
+
+    def test_overrides_and_rejections_survive(
+        self, depth_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out"
+        assert _process(depth_cache, out) == 0
+        sidecar = ResultsFile(depth_cache.with_name("data_20260911_124617.depth.h5"))
+        stored = sidecar.load()
+        assert stored is not None
+        steep = next(r for r in stored.results if r.key == STEEP)
+        sidecar.replace_overrides(
+            [(replace(steep, status="no_gain"), [], DepthOptions(min_gain=0.9))]
+        )
+        sidecar.set_review(CONCAVE, "rejected", "test")
+        capsys.readouterr()
+        assert _process(depth_cache, out) == 0
+        stdout = capsys.readouterr().out
+        assert "1 applied" in stdout and "rejected:   1" in stdout
+        assert read_dcc(out / "data_20260911_124617.dcc") == {}
+        rows = {r.key: r for r in read_summary_csv(out / "depth_summary.csv")}
+        assert rows[STEEP].options_source == "override" and rows[STEEP].status == "no_gain"
+        assert rows[CONCAVE].review == "rejected"
+        # A batch with the override's options reproduces it: dropped.
+        assert _process(depth_cache, out, "--min-gain", "0.9") == 0
+        assert "reproduced by the batch options" in capsys.readouterr().out
+        stored = sidecar.load()
+        assert stored is not None and not stored.overrides
+
+    def test_discard_flags(
+        self, depth_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out"
+        assert _process(depth_cache, out) == 0
+        sidecar = ResultsFile(depth_cache.with_name("data_20260911_124617.depth.h5"))
+        stored = sidecar.load()
+        assert stored is not None
+        steep = next(r for r in stored.results if r.key == STEEP)
+        sidecar.replace_overrides([(steep, [], DepthOptions(max_degree=1))])
+        sidecar.set_review(CONCAVE, "rejected")
+        assert _process(depth_cache, out, "--discard-overrides", "--discard-review") == 0
+        stdout = capsys.readouterr().out
+        assert "discarded (--discard-overrides)" in stdout
+        assert "discarded (--discard-review)" in stdout
+        assert set(read_dcc(out / "data_20260911_124617.dcc")) == {STEEP, CONCAVE}
+        stored = sidecar.load()
+        assert stored is not None and not stored.overrides and not stored.review
+
+    def test_stale_results_drop_overrides_keep_review(
+        self, depth_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "out"
+        assert _process(depth_cache, out) == 0
+        sidecar = ResultsFile(depth_cache.with_name("data_20260911_124617.depth.h5"))
+        stored = sidecar.load()
+        assert stored is not None
+        steep = next(r for r in stored.results if r.key == STEEP)
+        sidecar.replace_overrides([(steep, [], DepthOptions(max_degree=1))])
+        sidecar.set_review(CONCAVE, "rejected")
+        # A .kev with (slightly) different values: another fingerprint.
+        kev = write_kev(
+            tmp_path / "cal.kev",
+            {
+                k: (v[0] + 1e-6, v[1])
+                for k, v in depth_calibrations(DEPTH_BOARDS, UNCALIBRATED).items()
+            },
+        )
+        capsys.readouterr()
+        assert _process(depth_cache, out, "--kev", str(kev)) == 0
+        stdout = capsys.readouterr().out
+        assert "stale" in stdout and "overrides:  0 applied" in stdout
+        assert "rejected:   1" in stdout
+        stored = sidecar.load()
+        assert stored is not None and not stored.overrides and CONCAVE in stored.review
+
+    def test_unwritable_default_location(
+        self, depth_cache: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        directory = depth_cache.parent
+        directory.chmod(0o555)
+        try:
+            assert _process(depth_cache, tmp_path.parent / f"{tmp_path.name}-out") == 1
+        finally:
+            directory.chmod(0o755)
+        assert "--results" in capsys.readouterr().err
+
+    def test_errors(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        assert _process(tmp_path / "none.cache.h5", tmp_path / "out") == cli.EXIT_USAGE
+        with pytest.raises(SystemExit) as excinfo:
+            _process(tmp_path / "none.cache.h5", tmp_path / "out", "--min-gain", "nan")
+        assert excinfo.value.code == cli.EXIT_USAGE
+        bogus = tmp_path / "bogus.cache.h5"
+        bogus.write_text("x")
+        assert _process(bogus, tmp_path / "out") == cli.EXIT_ERROR

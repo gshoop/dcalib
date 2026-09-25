@@ -2,9 +2,18 @@
 
 Subcommands (plan section 8):
 
-``dcalib process CACHE --output-dir DIR [...]``
-    Depth-calibrate every anode of an adc2kev calibration cache and write
-    ``<name>.dcc`` and ``depth_summary.csv``. Phase 4.
+``dcalib process CACHE --output-dir DIR [--kev KEV] [--results PATH]
+[--workers N] [--sources both|ge|cs] [--min-pairs N] [--max-degree {0,1,2}]
+[--min-gain F] [--concave-only] [--discard-overrides] [--discard-review]``
+    Depth-calibrate every anode of an adc2kev calibration cache (plan 8):
+    write-test the output directory, check the cache, load and fingerprint the
+    calibrations, read the stored overrides and review from the sidecar
+    (unless discarded, or the overrides are stale), analyse every board in a
+    process pool, write ``<name>.dcc`` and ``depth_summary.csv`` atomically
+    (overrides applied, rejected anodes left out of the ``.dcc``), store the
+    batch as ``/results/current`` of the sidecar, and print the census and
+    timings. An override whose options fit like the new batch is dropped (the
+    batch reproduces it).
 
 ``dcalib legacy CACHE --output-dir DIR [--kev KEV] [--energy {511,662}]
 [--no-eof-quirk]``
@@ -20,25 +29,47 @@ arguments, 130 when stopped with Ctrl-C.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import math
+import signal
 import sys
+import threading
 import time
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TextIO
+from types import FrameType
+from typing import Any, TextIO
 
 import h5py
+import numpy as np
 from adc2kev.cache import CalibrationCache
 
 from dcalib import __version__
+from dcalib.analysis import (
+    AnalysisCancelled,
+    AnalysisError,
+    AnodeResult,
+    analyze_all,
+    default_workers,
+    merge_results,
+)
 from dcalib.calib import CalibrationError, Calibrations, load_calibrations
+from dcalib.events import list_boards
 from dcalib.io import cache_stem
 from dcalib.io.dcc import write_dcc
-from dcalib.io.export import prepare_output_dir
+from dcalib.io.export import output_paths, prepare_output_dir, write_outputs
 from dcalib.io.summary_csv import LEGACY_SUMMARY_NAME, write_legacy_summary
 from dcalib.legacy import legacy_all, legacy_constants
-from dcalib.options import STATUS_OK
+from dcalib.options import FLAGS, STATUS_OK, STATUSES, DepthOptions
+from dcalib.results import (
+    ResultsError,
+    ResultsFile,
+    StoredResults,
+    cache_identity,
+    default_results_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,14 +227,280 @@ def _add_legacy_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     p.set_defaults(func=_run_legacy)
 
 
-def _not_implemented(command: str, phase: int) -> int:
-    print(f"dcalib {command}: not implemented yet (planned for phase {phase}).", file=sys.stderr)
-    return EXIT_ERROR
+def _depth_options(args: argparse.Namespace) -> DepthOptions:
+    """``DepthOptions`` from the defaults plus the options given on the command line."""
+    given: dict[str, Any] = {}
+    if args.sources is not None:
+        given["sources"] = args.sources
+    if args.min_pairs is not None:
+        given["min_pairs"] = args.min_pairs
+    if args.max_degree is not None:
+        given["max_degree"] = args.max_degree
+    if args.min_gain is not None:
+        given["min_gain"] = args.min_gain
+    if args.concave_only:
+        given["concave_only"] = True
+    return DepthOptions(**given)
+
+
+def _describe_options(options: DepthOptions) -> str:
+    changed = options.changed_fields()
+    return ", ".join(f"{k}={v}" for k, v in changed.items()) if changed else "defaults"
+
+
+def _results_file(args: argparse.Namespace) -> ResultsFile:
+    """The sidecar; an unwritable default location is an error suggesting ``--results``."""
+    if args.results is not None:
+        results = ResultsFile(args.results)
+        results.check_writable()
+        return results
+    results = ResultsFile(default_results_path(args.cache))
+    try:
+        results.check_writable()
+    except OSError as exc:
+        raise OSError(f"{exc}; choose another location with --results PATH") from exc
+    return results
 
 
 def _run_process(args: argparse.Namespace) -> int:
-    """Run ``dcalib process`` (phase 4)."""
-    return _not_implemented(args.command, phase=4)
+    """Run ``dcalib process`` (see the module docstring)."""
+    error = _check_inputs(args)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        options = _depth_options(args)
+    except (TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    name = cache_stem(args.cache)
+    t_start = time.perf_counter()
+    try:
+        prepare_output_dir(args.output_dir, [p.name for p in output_paths(args.output_dir, name)])
+        _check_cache(args.cache)
+        calibrations = _load_calibrations(args)
+        identity = cache_identity(args.cache)
+        sidecar = _results_file(args)
+        stored = sidecar.load() if sidecar.exists() else None
+        t_setup = time.perf_counter()
+
+        overrides, n_reproduced, stale_reasons = _usable_overrides(
+            stored, identity, calibrations, options, discard=args.discard_overrides
+        )
+        review = {} if args.discard_review or stored is None else stored.review_states()
+        if stored is None and not args.discard_review:
+            review = {k: e.state for k, e in sidecar.load_review().items()}
+
+        n_boards = len(list_boards(args.cache))
+        workers = min(args.workers or default_workers(), max(n_boards, 1))
+        print(
+            f"Analysing {n_boards} boards with {workers} worker(s), options: "
+            f"{_describe_options(options)}",
+            file=sys.stderr,
+        )
+        analysis = _analyze_with_progress(args.cache, calibrations, options, workers)
+        t_analysis = time.perf_counter()
+
+        merged = merge_results(analysis.results, (o.result for o in overrides), review)
+        metadata = _csv_metadata(args, calibrations, options, sidecar)
+        dcc_path, csv_path = write_outputs(args.output_dir, name, merged, metadata)
+        t_write = time.perf_counter()
+
+        n_dropped = sidecar.save_batch(
+            analysis.results,
+            analysis.slices,
+            options,
+            identity,
+            calibrations,
+            keep_overrides=not args.discard_overrides,
+        )
+        if args.discard_review:
+            sidecar.clear_review()
+        t_store = time.perf_counter()
+    except AnalysisCancelled:
+        print("analysis cancelled; nothing was stored or written.", file=sys.stderr)
+        return EXIT_INTERRUPTED
+    except (AnalysisError, CalibrationError, ResultsError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"Results: {sidecar.path}")
+    if stale_reasons:
+        print("  the stored results were stale (" + "; ".join(stale_reasons) + ")")
+    _print_census(merged, n_boards, workers, options)
+    _print_review_census(args, overrides, n_reproduced, n_dropped, review, merged)
+    n_lines = sum(1 for r in merged if r.exported)
+    print("Outputs:")
+    print(f"  {dcc_path}  ({n_lines:,} lines)")
+    print(f"  {csv_path}  ({len(merged):,} rows)")
+    print(
+        f"Time: setup {t_setup - t_start:.1f} s, analysis {t_analysis - t_setup:.1f} s, "
+        f"write {t_write - t_analysis:.1f} s, store {t_store - t_write:.1f} s, "
+        f"total {t_store - t_start:.1f} s"
+    )
+    return EXIT_OK
+
+
+def _usable_overrides(
+    stored: StoredResults | None,
+    identity: Any,
+    calibrations: Calibrations,
+    options: DepthOptions,
+    *,
+    discard: bool,
+) -> tuple[list[Any], int, tuple[str, ...]]:
+    """The stored overrides to apply, how many the batch reproduces, and stale reasons."""
+    if stored is None:
+        return [], 0, ()
+    validity = stored.validity(identity, calibrations.fingerprint)
+    if discard or validity.stale:
+        return [], 0, validity.reasons
+    kept, reproduced = [], 0
+    for override in stored.overrides.values():
+        if override.reproduced_by(options):
+            reproduced += 1
+        else:
+            kept.append(override)
+    return kept, reproduced, ()
+
+
+def _csv_metadata(
+    args: argparse.Namespace,
+    calibrations: Calibrations,
+    options: DepthOptions,
+    sidecar: ResultsFile,
+) -> list[tuple[str, object]]:
+    return [
+        ("cache", args.cache.resolve()),
+        ("calibration", calibrations.source),
+        ("calibration_fingerprint", calibrations.fingerprint),
+        ("options", options.to_json()),
+        ("results", sidecar.path.resolve()),
+        ("dcalib_version", __version__),
+    ]
+
+
+def _analyze_with_progress(
+    cache: Path, calibrations: Calibrations, options: DepthOptions, workers: int
+) -> Any:
+    stop = threading.Event()
+    progress = _ProgressPrinter("analysing")
+
+    def on_progress(done: int, total: int) -> None:
+        progress(done / total if total else 1.0)
+
+    try:
+        with _sigint_sets(stop):
+            return analyze_all(
+                cache,
+                calibrations,
+                options,
+                workers=workers,
+                progress_cb=on_progress,
+                stop_flag=stop,
+            )
+    finally:
+        progress.close()
+
+
+def _median(values: list[float]) -> str:
+    return f"{float(np.median(values)):.2f}" if values else "-"
+
+
+def _print_census(
+    results: list[AnodeResult], n_boards: int, workers: int, options: DepthOptions
+) -> None:
+    """Print the status/flag census and the fleet resolution of the exported results."""
+    n_events = sum(r.n_events for r in results)
+    print(
+        f"Analysis: {len(results):,} anodes ({n_events:,} 1A1C events) on {n_boards} boards, "
+        f"{workers} worker(s), options: {_describe_options(options)}"
+    )
+    statuses = Counter(r.status for r in results)
+    print("  status:     " + ", ".join(f"{s} {statuses.get(s, 0):,}" for s in STATUSES))
+    flags = {flag: sum(1 for r in results if flag in r.flags) for flag in FLAGS}
+    print("  flags:      " + (", ".join(f"{f} {n:,}" for f, n in flags.items() if n) or "none"))
+    ok = [r for r in results if r.ok]
+    for energy in (511, 662):
+        for metric in ("fwhm", "fwtm"):
+            before = [getattr(r, f"{metric}_{energy}_before") for r in ok]
+            after = [getattr(r, f"{metric}_{energy}_after") for r in ok]
+            pairs = [(b, a) for b, a in zip(before, after) if b is not None and a is not None]
+            if pairs:
+                b_values = [b for b, _ in pairs]
+                a_values = [a for _, a in pairs]
+                print(
+                    f"  {metric.upper()} {energy} keV of ok anodes (median, %): "
+                    f"{_median(b_values)} -> {_median(a_values)} ({len(pairs):,} anodes)"
+                )
+    gains = [r.cv_gain for r in ok if r.cv_gain is not None]
+    if gains:
+        print(f"  cv_gain of ok anodes: median {100 * float(np.median(gains)):.2f} %")
+    for energy in (511, 662):
+        exported = [getattr(r, f"peak_{energy}") for r in results if r.exported]
+        omitted = [getattr(r, f"peak_{energy}") for r in results if not r.exported]
+        e_vals = [v for v in exported if v is not None]
+        o_vals = [v for v in omitted if v is not None]
+        if e_vals or o_vals:
+            e_text = f"{float(np.median(e_vals)):.4f}" if e_vals else "-"
+            o_text = f"{float(np.median(o_vals)):.4f}" if o_vals else "-"
+            print(
+                f"  photopeak position {energy} keV (median, E/E0): corrected {e_text}, "
+                f"omitted {o_text}"
+            )
+
+
+def _print_review_census(
+    args: argparse.Namespace,
+    overrides: list[Any],
+    n_reproduced: int,
+    n_dropped: int,
+    review: dict[Any, str],
+    merged: list[AnodeResult],
+) -> None:
+    if args.discard_overrides:
+        print("  overrides:  discarded (--discard-overrides)")
+    else:
+        text = f"{len(overrides):,} applied"
+        if n_reproduced:
+            text += f", {n_reproduced:,} reproduced by the batch options (dropped)"
+        elif n_dropped:
+            text += f", {n_dropped:,} dropped"
+        print(f"  overrides:  {text}")
+    if args.discard_review:
+        print("  review:     discarded (--discard-review)")
+    else:
+        rejected = sorted(k for k, state in review.items() if state)
+        present = {r.key for r in merged}
+        listed = ", ".join(str(k) for k in rejected[:10])
+        more = f" and {len(rejected) - 10} more" if len(rejected) > 10 else ""
+        orphans = sum(1 for k in rejected if k not in present)
+        print(
+            f"  rejected:   {len(rejected):,}"
+            + (f" ({listed}{more})" if rejected else "")
+            + (f"; {orphans} without a result" if orphans else "")
+        )
+
+
+@contextlib.contextmanager
+def _sigint_sets(stop: threading.Event) -> Iterator[None]:
+    """While active, Ctrl-C sets ``stop`` instead of raising KeyboardInterrupt."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(_signum: int, _frame: FrameType | None) -> None:
+        if stop.is_set():
+            print("\nstill stopping the analysis...", file=sys.stderr, flush=True)
+            return
+        stop.set()
+        print("\nstopping the analysis...", file=sys.stderr, flush=True)
+
+    previous = signal.signal(signal.SIGINT, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 class _ProgressPrinter:

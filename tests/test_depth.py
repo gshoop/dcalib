@@ -250,7 +250,29 @@ class TestFitAnode:
         np.testing.assert_array_equal(fit.correction(np.array([0.9])), [1.0])
 
     def test_width_ratio(self) -> None:
-        raw = depth.Alignment(depth_var=0.02**2, sigma=0.03, n_slices=6)
-        corrected = depth.Alignment(depth_var=-1e-6, sigma=0.024, n_slices=6)
-        assert depth.width_ratio(raw, corrected) == pytest.approx(0.024 / math.hypot(0.024, 0.02))
-        assert math.isnan(depth.width_ratio(depth.Alignment(math.nan, 0.02, 1), corrected))
+        aligned = depth.Alignment(raw_var=0.02**2, corrected_var=-1e-6, n_slices=6)
+        assert depth.width_ratio(aligned, 0.024) == pytest.approx(0.024 / math.hypot(0.024, 0.02))
+        assert math.isnan(depth.width_ratio(depth.Alignment(math.nan, 0.0, 1), 0.024))
+        assert math.isnan(depth.width_ratio(aligned, math.nan))
+
+    def test_alignment_pairs_slices(self) -> None:
+        x, r, s = sd.simulate(6000, sd.steep, 3)
+        sel = depth.select(x, r, s, OPTS)
+        xs, rs = x[sel], r[sel]
+        corrected = xs / sd.steep(rs)
+        # Break the lowest-r slice of the corrected energies: it must be left out of both.
+        broken = corrected.copy()
+        first = np.array_split(np.argsort(rs, kind="stable"), depth.n_slices_for(len(xs), OPTS))[0]
+        broken[first] = 0.5
+        aligned = depth.alignment(xs, broken, rs, OPTS, 0.03, 1.0)
+        assert aligned.n_slices == depth.n_slices_for(len(xs), OPTS) - 1
+        assert aligned.raw_var > 10 * max(aligned.corrected_var, 1e-6)
+
+    def test_slice_seed_rejects_far_peaks(self) -> None:
+        rng = np.random.default_rng(8)
+        # A slice whose strongest structure is a bump at x = 0.82 (continuum):
+        # seeded at the pooled peak (1.0) it must not report 0.82.
+        x = np.concatenate([rng.normal(0.82, 0.02, 3000), rng.normal(1.0, 0.024, 1000)])
+        r = rng.uniform(0.9, 1.2, len(x))
+        slices = depth.fit_slices(x, r, DepthOptions(min_slices=3), 0.025, 1.0)
+        assert len(slices) == 0 or np.all(np.abs(slices.mu - 1.0) < depth.MAX_SLICE_SHIFT)

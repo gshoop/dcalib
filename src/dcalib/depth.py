@@ -36,8 +36,8 @@ Steps (all thresholds are :class:`~dcalib.options.DepthOptions` fields):
    of r slices of the raw and of these out-of-fold corrected energies are
    measured on the same slices; the spread of the positions (minus their fit
    noise) is the depth broadening, and the predicted width ratio is
-   ``sqrt((sigma^2 + V_corr) / (sigma^2 + V_raw))`` with the slices' core
-   width ``sigma``. ``cv_gain`` is ``1 - ratio`` averaged over sources. The
+   ``sqrt((sigma^2 + V_corr) / (sigma^2 + V_raw))`` with ``sigma`` the
+   corrected photopeak's FWHM / 2.355 (net peak of the smoothed spectrum). ``cv_gain`` is ``1 - ratio`` averaged over sources. The
    correction is accepted when ``cv_gain >= min_gain`` and no source's
    relative loss (``ratio - 1``) exceeds ``max_source_loss``; otherwise
    ``no_gain``. The accepted curve is the fit on all events. (The plan first
@@ -65,7 +65,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.stats import chi2 as chi2_dist
 
-from dcalib.metrics import MIN_METRIC_EVENTS, PeakFit, fit_photopeak
+from dcalib.metrics import FWHM_PER_SIGMA, MIN_METRIC_EVENTS, PeakFit, fit_photopeak, fwhm_pct
 from dcalib.options import (
     FLAG_CONVEX_CURVE,
     FLAG_EXTRAPOLATION_RISK,
@@ -131,6 +131,8 @@ class Slices:
         sigma: Gaussian-core width in x.
         n: Events in the slice.
         n_failed: Slices whose fit failed (not in the arrays).
+        index: Slice number (0 = lowest r) of each successful fit; by default
+            ``0..len-1``.
     """
 
     r_lo: FloatArray
@@ -141,6 +143,11 @@ class Slices:
     sigma: FloatArray
     n: npt.NDArray[np.int64]
     n_failed: int = 0
+    index: npt.NDArray[np.int64] | None = None
+
+    def __post_init__(self) -> None:
+        if self.index is None:
+            object.__setattr__(self, "index", np.arange(len(self.mu), dtype=np.int64))
 
     def __len__(self) -> int:
         return len(self.mu)
@@ -149,6 +156,21 @@ class Slices:
     def empty(cls, n_failed: int = 0) -> Slices:
         e = np.empty(0, dtype=np.float64)
         return cls(e, e, e, e, e, e, np.empty(0, dtype=np.int64), n_failed)
+
+    def take(self, keep: npt.NDArray[np.bool_]) -> Slices:
+        """The slices selected by a boolean mask (``n_failed`` is kept)."""
+        assert self.index is not None
+        return Slices(
+            self.r_lo[keep],
+            self.r_hi[keep],
+            self.r_med[keep],
+            self.mu[keep],
+            self.mu_err[keep],
+            self.sigma[keep],
+            self.n[keep],
+            self.n_failed,
+            self.index[keep],
+        )
 
     @property
     def spread(self) -> float:
@@ -221,7 +243,18 @@ def select(
     return np.asarray(in_r & in_x & in_source & np.isfinite(x) & np.isfinite(r))
 
 
-def _peak(values: FloatArray, options: DepthOptions, seed_sigma: float | None) -> PeakFit:
+MAX_SLICE_SHIFT = 0.15
+"""A slice position further than this (in x) from the anode's pooled peak is a failed fit
+(it has locked onto the continuum or the tail, not the photopeak)."""
+
+
+def _peak(
+    values: FloatArray,
+    options: DepthOptions,
+    seed_sigma: float | None,
+    near: float | None = None,
+) -> PeakFit:
+    """Fit a photopeak; with ``near``, its seed is the mode within ``MAX_SLICE_SHIFT`` of it."""
     return fit_photopeak(
         values,
         hist_lo=options.hist_lo,
@@ -231,7 +264,13 @@ def _peak(values: FloatArray, options: DepthOptions, seed_sigma: float | None) -
         window_hi_sigma=options.window_hi_sigma,
         window_iterations=options.window_iterations,
         seed_sigma=seed_sigma,
+        mode_range=None if near is None else (near - MAX_SLICE_SHIFT, near + MAX_SLICE_SHIFT),
     )
+
+
+def _seeds(pooled: PeakFit) -> tuple[float | None, float | None]:
+    """``(seed_sigma, seed_mu)`` for slice fits from an anode's pooled fit."""
+    return (pooled.sigma, pooled.mu) if pooled.ok else (None, None)
 
 
 def n_slices_for(n_events: int, options: DepthOptions) -> int:
@@ -240,21 +279,35 @@ def n_slices_for(n_events: int, options: DepthOptions) -> int:
 
 
 def fit_slices(
-    x: FloatArray, r: FloatArray, options: DepthOptions, seed_sigma: float | None
+    x: FloatArray,
+    r: FloatArray,
+    options: DepthOptions,
+    seed_sigma: float | None,
+    seed_mu: float | None = None,
 ) -> Slices:
-    """Steps 2-3: equal-count r slices of the given (selected) events and their peak fits."""
+    """Steps 2-3: equal-count r slices of the given (selected) events and their peak fits.
+
+    Each slice fit starts at the slice's own mode, searched within
+    :data:`MAX_SLICE_SHIFT` of ``seed_mu`` (the anode's pooled peak), with the
+    window width of ``seed_sigma``; without seeds, at the mode of the whole
+    histogram and the half-maximum width. A fit further than
+    ``MAX_SLICE_SHIFT`` from ``seed_mu`` counts as failed (it locked onto the
+    continuum or the tail). Slices are numbered from the lowest r
+    (``Slices.index``), so the same events sliced twice (raw and corrected)
+    can be paired.
+    """
     n_total = len(x)
     if n_total == 0:
         return Slices.empty()
     order = np.argsort(r, kind="stable")
     parts = np.array_split(order, n_slices_for(n_total, options))
-    rows: list[tuple[float, float, float, float, float, float, int]] = []
+    rows: list[tuple[float, float, float, float, float, float, int, int]] = []
     failed = 0
-    for idx in parts:
+    for number, idx in enumerate(parts):
         if len(idx) == 0:
             continue
-        fit = _peak(x[idx], options, seed_sigma)
-        if not fit.ok:
+        fit = _peak(x[idx], options, seed_sigma, seed_mu)
+        if not fit.ok or (seed_mu is not None and abs(fit.mu - seed_mu) > MAX_SLICE_SHIFT):
             failed += 1
             continue
         rs = r[idx]
@@ -267,6 +320,7 @@ def fit_slices(
                 fit.mu_err,
                 fit.sigma,
                 len(idx),
+                number,
             )
         )
     if not rows:
@@ -281,6 +335,7 @@ def fit_slices(
         sigma=np.array(cols[5]),
         n=np.array(cols[6], dtype=np.int64),
         n_failed=failed,
+        index=np.array(cols[7], dtype=np.int64),
     )
 
 
@@ -377,8 +432,7 @@ def fit_depth_curve(
         if n_sel < (options.min_pairs if check_min_pairs else options.min_pairs // 2):
             return _CurveFit(STATUS_TOO_FEW_EVENTS, curve, slices, n_sel, selected, first)
         xs, rs = x[selected], r[selected]
-        pooled = _peak(xs, options, None)
-        slices = fit_slices(xs, rs, options, pooled.sigma if pooled.ok else None)
+        slices = fit_slices(xs, rs, options, *_seeds(_peak(xs, options, None)))
         if len(slices) < 3:
             return _CurveFit(STATUS_FIT_FAILED, None, slices, n_sel, selected, first)
         if degree is None:
@@ -410,48 +464,76 @@ class CrossValidation:
     accepted: bool
 
 
+def _depth_variance(slices: Slices) -> float:
+    """Sample variance of the slice positions minus their mean squared error, times (k-1)/k."""
+    k = len(slices)
+    if k < 2:
+        return math.nan
+    spread = float(np.var(slices.mu, ddof=1) - np.mean(slices.mu_err**2))
+    return spread * (k - 1) / k
+
+
 @dataclass(frozen=True)
 class Alignment:
-    """How well a set of events' photopeak positions line up across r.
+    """How well the photopeak positions of raw and corrected energies line up across r.
 
     Attributes:
-        depth_var: Sample variance of the slice positions minus their mean
-            squared fit error (the part due to depth), times ``(k-1)/k`` for
-            ``k`` slices; noise can make it slightly negative.
-        sigma: Median Gaussian-core width of the slices.
-        n_slices: Slices with a successful fit.
+        raw_var: Depth variance of the raw slice positions: their sample
+            variance minus their mean squared fit error, times ``(k-1)/k``
+            for ``k`` slices (noise can make it slightly negative).
+        corrected_var: The same for the corrected energies, on the same slices.
+        n_slices: Slices fitted successfully in both.
     """
 
-    depth_var: float
-    sigma: float
+    raw_var: float
+    corrected_var: float
     n_slices: int
 
 
 def alignment(
-    x: FloatArray, r: FloatArray, options: DepthOptions, seed_sigma: float | None
+    raw: FloatArray,
+    corrected: FloatArray,
+    r: FloatArray,
+    options: DepthOptions,
+    seed_sigma: float | None,
+    seed_mu: float | None,
 ) -> Alignment:
-    """Slice ``x`` in r (as in step 2) and measure the spread of the slice positions."""
-    slices = fit_slices(x, r, options, seed_sigma)
-    k = len(slices)
-    if k < 2:
-        return Alignment(math.nan, math.nan, k)
-    spread = float(np.var(slices.mu, ddof=1) - np.mean(slices.mu_err**2))
-    return Alignment(spread * (k - 1) / k, float(np.median(slices.sigma)), k)
+    """Slice the events in r (as in step 2) and compare the spread of the slice positions.
 
-
-def width_ratio(raw: Alignment, corrected: Alignment) -> float:
-    """Predicted corrected/raw photopeak width from the alignment of both.
-
-    ``sqrt((sigma^2 + V_corr) / (sigma^2 + V_raw))``, with the slice core width
-    ``sigma`` of the corrected events and the depth variances clipped at 0:
-    the photopeak is the core broadened by the spread of positions over r.
+    Raw and corrected energies of the same events are sliced identically, and
+    only the slices whose fit succeeded in both are compared.
     """
-    sigma = corrected.sigma
-    values = (sigma, raw.depth_var, corrected.depth_var)
-    if not all(math.isfinite(v) for v in values):
+    raw_slices = fit_slices(raw, r, options, seed_sigma, seed_mu)
+    corrected_slices = fit_slices(corrected, r, options, seed_sigma, seed_mu)
+    assert raw_slices.index is not None and corrected_slices.index is not None
+    common = np.intersect1d(raw_slices.index, corrected_slices.index)
+    raw_slices = raw_slices.take(np.isin(raw_slices.index, common))
+    corrected_slices = corrected_slices.take(np.isin(corrected_slices.index, common))
+    return Alignment(_depth_variance(raw_slices), _depth_variance(corrected_slices), len(common))
+
+
+def width_ratio(alignment: Alignment, sigma: float) -> float:
+    """Predicted corrected/raw photopeak width: ``sqrt((s^2 + V_corr) / (s^2 + V_raw))``.
+
+    ``sigma`` is the photopeak width without the depth spread (in x); the
+    depth variances are clipped at 0.
+    """
+    values = (sigma, alignment.raw_var, alignment.corrected_var)
+    if not all(math.isfinite(v) for v in values) or sigma <= 0:
         return math.nan
     base = sigma * sigma
-    return math.sqrt((base + max(corrected.depth_var, 0.0)) / (base + max(raw.depth_var, 0.0)))
+    raw = base + max(alignment.raw_var, 0.0)
+    return math.sqrt((base + max(alignment.corrected_var, 0.0)) / raw)
+
+
+def _peak_sigma(values: FloatArray) -> float:
+    """The photopeak width in x as an equivalent Gaussian sigma: FWHM / 2.355.
+
+    The net-peak FWHM of the smoothed spectrum (:func:`dcalib.metrics.fwhm_pct`),
+    not the Gaussian core: the gain is judged against the real peak width.
+    """
+    width = fwhm_pct(values)
+    return width / 100.0 / FWHM_PER_SIGMA if math.isfinite(width) else math.nan
 
 
 def cross_validate(
@@ -492,12 +574,9 @@ def cross_validate(
         mask = in_r & (source == s)
         if int(mask.sum()) < MIN_METRIC_EVENTS:
             continue
-        xs, rs = x[mask], r[mask]
-        pooled = _peak(xs, options, None)
-        seed = pooled.sigma if pooled.ok else None
-        ratio = width_ratio(
-            alignment(xs, rs, options, seed), alignment(corrected[mask], rs, options, seed)
-        )
+        xs, rs, cs = x[mask], r[mask], corrected[mask]
+        aligned = alignment(xs, cs, rs, options, *_seeds(_peak(xs, options, None)))
+        ratio = width_ratio(aligned, _peak_sigma(cs))
         if math.isfinite(ratio):
             loss[s] = ratio - 1.0
     gain = -float(np.mean(list(loss.values()))) if loss else math.nan
@@ -577,6 +656,7 @@ def _source_consistency(
     degree: int,
     options: DepthOptions,
     seed_sigma: float | None,
+    seed_mu: float | None,
 ) -> tuple[dict[str, Slices], dict[str, Curve], float, bool]:
     """Step 8: per-source curves at ``degree``; returns (slices, curves, max diff, flag)."""
     slices: dict[str, Slices] = {}
@@ -586,7 +666,7 @@ def _source_consistency(
         mask = selected & (source == s)
         if int(mask.sum()) < need:
             continue
-        sl = fit_slices(x[mask], r[mask], options, seed_sigma)
+        sl = fit_slices(x[mask], r[mask], options, seed_sigma, seed_mu)
         if len(sl) < max(degree + 1, 3):
             continue
         slices[name] = sl
@@ -657,9 +737,14 @@ def fit_anode(
     source_curves: dict[str, Curve] = {}
     max_diff = math.nan
     if opts.sources == SOURCES_BOTH:
-        pooled = _peak(xs[fitted.selected], opts, None)
         per_slices, source_curves, max_diff, inconsistent = _source_consistency(
-            xs, rs, ss, fitted.selected, curve.degree, opts, pooled.sigma if pooled.ok else None
+            xs,
+            rs,
+            ss,
+            fitted.selected,
+            curve.degree,
+            opts,
+            *_seeds(_peak(xs[fitted.selected], opts, None)),
         )
         slices.update(per_slices)
         if inconsistent:

@@ -2,10 +2,12 @@
 
 ``DepthOptions`` holds every threshold of the event building and the default
 depth fit (plan sections 5.1 and 5.3). The numeric defaults are the plan's
-initial values except the slice fit window, widened from ``[mu - 1.5 sigma,
-mu + 2.5 sigma]`` to ``[mu - 2 sigma, mu + 3 sigma]`` by the phase-3 synthetic
-study (it halves the slice position error; ``docs/ALGORITHM.md``). The
-phase-4 census retunes them (open item O1).
+initial values except four, retuned (open item O1, ``docs/ALGORITHM.md``):
+the slice fit window ``[mu - 2 sigma, mu + 3 sigma]`` (was 1.5/2.5 sigma;
+phase-3 synthetic study, confirmed by the phase-4 census), ``min_pairs`` 500
+(was 800), ``max_source_loss`` 0.01 (was 0.005, below the per-source noise)
+and ``coverage_r_lo`` 0.25 (was 0.15, which flagged a fifth of the fleet: r
+typically starts near 0.1).
 
 The status, flag and review strings below are the single source of truth for
 the ``status``, ``flags`` and ``review`` CSV columns (plan 5.3 and 6.4).
@@ -252,7 +254,7 @@ class DepthOptions:
     x_hi: float = 1.12
     r_lo: float = 0.0
     r_hi: float = 1.3
-    min_pairs: int = 800
+    min_pairs: int = 500
     per_slice: int = 400
     min_slices: int = 4
     max_slices: int = 12
@@ -267,14 +269,14 @@ class DepthOptions:
     concave_only: bool = False
     gate_iterations: int = 1
     min_gain: float = 0.01
-    max_source_loss: float = 0.005
+    max_source_loss: float = 0.01
     consistency_min_diff: float = 0.01
     consistency_nsigma: float = 3.0
     consistency_min_slices: int = 3
     extrap_r_max: float = 1.3
     extrap_g_lo: float = 0.85
     extrap_g_hi: float = 1.10
-    coverage_r_lo: float = 0.15
+    coverage_r_lo: float = 0.25
     coverage_r_hi: float = 0.95
     partial_cathode_frac: float = 0.5
 

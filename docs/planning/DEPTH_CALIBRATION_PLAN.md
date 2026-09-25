@@ -1,8 +1,10 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-3 are implemented (skeleton; options, channels, calibrations and event building;
-the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics).
+user. Phases 0-4 are implemented (skeleton; options, channels, calibrations and event building;
+the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics;
+the analysis driver, sidecar results, exports, `dcalib process` and the full-system census, see
+`docs/ALGORITHM.md`).
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 
@@ -356,6 +358,7 @@ in adc2kev's CSVs. It has one row per active anode with any 1A1C event, sorted b
 | `degree`, `p0`, `p1`, `p2`, `err_p0`, `err_p1`, `err_p2`, `chi2ndf`, `n_slices` | Curve in `.dcc` units (511·g) |
 | `peak_spread`, `ge_cs_max_diff`, `cv_gain` | Section 5.3 |
 | `fwhm_511_before`, `fwhm_511_after`, `fwhm_662_before`, `fwhm_662_after`, `fwtm_*` (the same four) | % |
+| `peak_511`, `peak_662` | Photopeak position (E/E0) of the exported spectrum (added in phase 4, for open item O3) |
 
 ## 7. Package layout and APIs
 
@@ -552,9 +555,9 @@ Commit at the end of every phase (conventional message, no co-author trailer). E
 
 | # | Item | Default until decided |
 |---|------|-----------------------|
-| O1 | The numeric defaults in section 5.3 (windows, slice sizes, `min_pairs`, `min_gain`, `p_degree`) are informed guesses | Retune in the phase-4 census, as uvcorr did in its phase 3. Phase 3 already widened the slice fit window to `[μ − 2σ, μ + 3σ]` on synthetic data |
+| O1 | The numeric defaults in section 5.3 (windows, slice sizes, `min_pairs`, `min_gain`, `p_degree`) are informed guesses | **Retuned** (phases 3-4, `docs/ALGORITHM.md` section 4.2): slice window `[μ − 2σ, μ + 3σ]`, `min_pairs` 500, `max_source_loss` 0.01, `coverage_r_lo` 0.25; the others kept |
 | O2 | The legacy concave-only constraint | Off; `convex_curve` flag; revisit after the census |
-| O3 | Accepted anodes are re-centred at E0 by p0 while omitted anodes keep the `.kev` scale (≲ 0.5 % offset) | Accept; report the fleet offset in the census |
+| O3 | Accepted anodes are re-centred at E0 by p0 while omitted anodes keep the `.kev` scale (≲ 0.5 % offset) | Accept; report the fleet offset in the census. **Measured:** about 0.1 % (median peak 0.9984 vs 0.9976 E/E0 at 511 keV); the census prints it |
 | O4 | The System Map would become a third fork (adc2kev → uvcorr → dcalib) | Fork uvcorr's (it already has metric colouring and overrides). Upstreaming a generic map into adc2kev is a follow-up for the user to decide |
 | O5 | Consumers evaluate the pol2 unclamped (D8) | `extrapolation_risk` flag. W14 gates C/A to [0, 1.2]; time-calibration does not |
 | O6 | The 48-tick window is the legacy constant, while the measured \|ΔCTS\| p99 is ≈ 23 | Keep 48 (parity with extractData); `cts_window` option |

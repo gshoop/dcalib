@@ -77,3 +77,58 @@ def test_prepare_output_dir(tmp_path: Path) -> None:
     (tmp_path / "file").write_text("")
     with pytest.raises(OSError, match="cannot create"):
         prepare_output_dir(tmp_path / "file" / "sub", ["x"])
+
+
+class TestSummaryCsv:
+    def test_schema_and_round_trip(self, tmp_path: Path) -> None:
+        from dcalib.analysis import CSV_COLUMNS, AnodeResult
+        from dcalib.io.export import dcc_entries, write_outputs
+        from dcalib.io.summary_csv import read_summary_csv
+
+        rows = [
+            AnodeResult(
+                node=1,
+                board=16,
+                rena=0,
+                channel=10,
+                status="ok",
+                degree=2,
+                p0=511.123456789,
+                p1=3.5,
+                p2=-2.25,
+                n_events=10,
+                flags=("convex_curve",),
+                fwhm_511_before=6.2,
+            ),
+            AnodeResult(
+                node=1, board=16, rena=0, channel=11, status="ok", p0=500.0, review="rejected"
+            ),
+            AnodeResult(node=1, board=15, rena=0, channel=9, status="no_gain", p0=505.0),
+        ]
+        dcc, csv_path = write_outputs(tmp_path, "run", rows, [("cache", "/x.cache.h5")])
+        text = csv_path.read_text()
+        lines = text.splitlines()
+        assert lines[0] == "# DCALIB Depth Calibration Summary"
+        assert "# cache: /x.cache.h5" in lines and lines[3] == "#"
+        assert lines[4] == ",".join(CSV_COLUMNS)
+        assert lines[5].startswith("1,15,0,9,")  # sorted by key
+        back = read_summary_csv(csv_path)
+        assert [r.key for r in back] == sorted(r.key for r in rows)
+        first = next(r for r in back if r.channel == 10)
+        assert first.p0 == 511.123457 or first.p0 == pytest.approx(511.123456789, rel=1e-9)
+        assert first.flags == ("convex_curve",) and first.chi2ndf is None
+        # Only ok, non-rejected anodes reach the .dcc.
+        assert set(read_dcc_file(dcc)) == {AnodeKey(1, 16, 0, 10)}
+        assert set(dcc_entries(rows)) == {AnodeKey(1, 16, 0, 10)}
+
+    def test_bad_header(self, tmp_path: Path) -> None:
+        from dcalib.io.summary_csv import read_summary_csv
+
+        path = tmp_path / "x.csv"
+        path.write_text("# x\n#\na,b\n1,2\n")
+        with pytest.raises(ValueError, match="unexpected header"):
+            read_summary_csv(path)
+
+
+def read_dcc_file(path: Path) -> dict[AnodeKey, tuple[float, float, float]]:
+    return dcc_io.read_dcc(path)

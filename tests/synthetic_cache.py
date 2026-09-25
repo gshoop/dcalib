@@ -9,7 +9,7 @@ carries every required attribute and adc2kev's ``CACHE_VERSION``,
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -199,3 +199,60 @@ def tie_pairs(scale: float) -> list[tuple[int, int]]:
         events += [(energy, ca * energy)] * n
     events += [(493.0, 0.3 * 493.0)] * 7 + [(511.0, 0.3 * 511.0)] * 8
     return [(round(a * scale), round(c * scale)) for a, c in events]
+
+
+# ---------------------------------------------------------------------------
+# Caches with a known depth curve per anode (analysis, results, CLI tests)
+# ---------------------------------------------------------------------------
+
+KEV_PER_ADC = 0.25
+"""Slope of every synthetic calibration (intercept 0): PHA = 4 * keV."""
+
+
+@dataclass(frozen=True)
+class AnodeRecipe:
+    """One synthetic anode: its depth curve, event count and cathode."""
+
+    curve: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]
+    n: int
+    seed: int = 0
+    cathode: tuple[int, int] | None = None  # default: the board's first cathode
+
+
+def depth_board(
+    node: int, board: int, anodes: Mapping[tuple[int, int], AnodeRecipe], *, t0: int = 1000
+) -> BoardData:
+    """Hits of a board whose anodes follow :func:`tests.synthetic_depth.simulate`."""
+    from dcalib.channels import cathode_channels
+    from tests.synthetic_depth import simulate
+
+    data = BoardData()
+    t = t0
+    default_cathode = cathode_channels(board)[0]
+    for (rena, channel), recipe in anodes.items():
+        x, r, source = simulate(recipe.n, recipe.curve, recipe.seed)
+        e0 = np.where(source == 1, 662.0, 511.0)
+        a_kev = x * e0
+        c_kev = np.clip(r * a_kev, 0.0, None)
+        cathode = recipe.cathode or default_cathode
+        for a, c, s in zip(a_kev, c_kev, source):
+            data.anode.add(rena, channel, int(round(a / KEV_PER_ADC)), t, int(s))
+            data.cathode.add(cathode[0], cathode[1], int(round(c / KEV_PER_ADC)), t + 3, int(s))
+            t += 1000
+    return data
+
+
+def depth_calibrations(
+    boards: Iterable[tuple[int, int]], uncalibrated: Iterable[Key] = ()
+) -> dict[Key, tuple[float, float]]:
+    """``KEV_PER_ADC`` calibrations for every channel of the boards except ``uncalibrated``."""
+    from dcalib.channels import anode_channels, cathode_channels
+
+    skip = set(uncalibrated)
+    cals: dict[Key, tuple[float, float]] = {}
+    for node, board in boards:
+        for rena, channel in anode_channels(board) + cathode_channels(board):
+            key = (node, board, rena, channel)
+            if key not in skip:
+                cals[key] = (KEV_PER_ADC, 0.0)
+    return cals

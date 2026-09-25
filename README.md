@@ -9,8 +9,10 @@ legacy Dcalib layout plus a `depth_summary.csv`. A PyQt6/pyqtgraph GUI (`dcalib-
 anode's depth curve and before/after spectra, re-fits channels with other options and rejects bad
 corrections. It is a separate package built on [adc2kev](../adc2kev-python), like `uvcorr`.
 
-> Status: phase 0 (project skeleton). The CLI subcommands and the GUI are not implemented yet.
-> See [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md).
+> Status: phases 0-4 of [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md)
+> are implemented: `dcalib process` and `dcalib legacy` work; the GUI is not implemented yet. The
+> algorithm, its deviations from the plan and the full-system census are in
+> [`docs/ALGORITHM.md`](docs/ALGORITHM.md).
 
 ## Install
 
@@ -28,12 +30,20 @@ another checkout).
 
 ## CLI usage
 
-_To be written (phases 2 and 4)._ Planned:
-
 ```bash
-dcalib process data.cache.h5 --output-dir out/ [--kev calibration.kev] [--workers N]
-dcalib legacy  data.cache.h5 --output-dir out/ [--energy 511]
+dcalib process data.cache.h5 --output-dir out/ [--kev calibration.kev] [--results PATH] \
+    [--workers N] [--sources both|ge|cs] [--min-pairs N] [--max-degree {0,1,2}] \
+    [--min-gain F] [--concave-only] [--discard-overrides] [--discard-review]
+dcalib legacy  data.cache.h5 --output-dir out/ [--kev calibration.kev] [--energy {511,662}] \
+    [--no-eof-quirk]
 ```
+
+`process` writes `out/<name>.dcc` (legacy layout, one line per corrected anode) and
+`out/depth_summary.csv`, and stores the results in the sidecar `<name>.depth.h5` next to the cache
+(or `--results PATH`). The full system (97.5M 1A1C events) takes about 30 s with 8 workers.
+`legacy` reproduces the C++ Dcalib for cross-checks (`<name>_legacy.dcc`, `legacy_summary.csv`);
+`scripts/dump_chd.py` and `scripts/compare_dcc.py` run the comparison with the ROOT binary.
+Full documentation arrives in phase 8.
 
 ## GUI usage
 

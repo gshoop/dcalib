@@ -27,9 +27,14 @@ error (0.06 % of E0 at 800 events); the bias is the same for equal-count slices,
 so it only shifts the curve's constant term.
 
 :func:`fwhm_pct` and :func:`fwtm_pct` are non-parametric: the full width at
-half and at a tenth of the maximum of the spectrum smoothed with a narrow
-Gaussian kernel (a kernel density estimate on a fine grid), in % of the peak
-position. The Gaussian-core width of :func:`fit_photopeak` is *not* used as the
+half and at a tenth of the net photopeak (above the continuum level) of the
+spectrum smoothed with a Gaussian kernel (a kernel density estimate on a fine
+grid), in % of the peak position. The continuum is subtracted because at
+511 keV the Compton continuum of CZT often stays above a tenth of the peak. The
+level is flat: exact for a flat continuum, while a continuum that ends under
+the low half of the peak narrows the widths (by about 10 % for one at 30 % of
+the peak); the metrics compare spectra of the same anode and across the fleet,
+not absolute resolutions. The Gaussian-core width of :func:`fit_photopeak` is *not* used as the
 resolution metric: with its free linear background in a narrow asymmetric
 window it absorbs the low-side shoulder that depth smearing creates, so it
 barely changes when a large depth effect is corrected (phase 3 study,
@@ -48,8 +53,10 @@ import numpy.typing as npt
 
 __all__ = [
     "FWHM_PER_SIGMA",
+    "CONTINUUM_OFFSETS",
     "KDE_BANDWIDTH",
     "KDE_RANGE",
+    "PEAK_SEARCH",
     "MIN_METRIC_EVENTS",
     "PeakFit",
     "fit_photopeak",
@@ -85,14 +92,28 @@ KDE_RANGE = (0.60, 1.30)
 KDE_BIN = 0.0005
 """Grid step in x of the smoothed spectra."""
 
-KDE_BANDWIDTH = 0.004
-"""Gaussian kernel sigma in x of the smoothed spectra (a sixth of a typical peak sigma;
-it widens a 5.7 % FWHM by about 1.4 % of itself)."""
+KDE_BANDWIDTH = 0.008
+"""Gaussian kernel sigma in x of the smoothed spectra. A third of a typical peak
+sigma: it widens a 5.7 % FWHM by about 5 % of itself, but a narrower kernel
+resolves the fine structure at the top of real peaks and makes the half-maximum
+crossings jump (phase 4, docs/ALGORITHM.md)."""
+
+MAX_CONTINUUM_FRACTION = 0.6
+"""Widths are NaN when the continuum level is above this fraction of the peak maximum."""
+
+PEAK_SEARCH = (0.85, 1.15)
+"""Range in x where the photopeak maximum is searched."""
+
+CONTINUUM_OFFSETS = (0.18, 0.10)
+"""The continuum level is the median of the smoothed spectrum from 0.18 to 0.10 below
+the peak (in x); the widths are measured on the peak above it."""
 
 _SERIES_U = 1e-4
 _LOG_CLIP = 700.0
-_FIT_TOL = 1e-10
-_LM_MAX_ITER = 200
+_FTOL = 1e-8  # relative change of the deviance (MINPACK's default is 1.49e-8)
+_XTOL = 1e-10  # step size relative to the parameters
+_STALL_TOL = 1e-6
+_LM_MAX_ITER = 300
 _SMOOTH_KERNEL = np.array([1.0, 2.0, 3.0, 2.0, 1.0]) / 9.0
 
 
@@ -293,6 +314,7 @@ def _levenberg_marquardt(
     _, res, jac, cost = _model_and_residuals(theta, z0, t, counts)
     lam = 1e-3
     converged = False
+    change = np.inf
     for _ in range(_LM_MAX_ITER):
         jtj = jac.T @ jac
         grad = jac.T @ res
@@ -336,11 +358,15 @@ def _levenberg_marquardt(
             break
         change = cost - new_cost
         cost = new_cost
-        if change <= _FIT_TOL * (1.0 + cost) or step_size <= _FIT_TOL * (
-            1.0 + np.max(np.abs(theta))
-        ):
+        if change <= _FTOL * (1.0 + cost) or step_size <= _XTOL * (1.0 + np.max(np.abs(theta))):
             converged = True
             break
+    else:
+        # Out of iterations while still creeping downhill: Gauss-Newton converges
+        # only linearly when the residual curvature matters (many empty bins). A
+        # last relative change this small moves the parameters far less than their
+        # statistical errors, so the fit is taken as converged.
+        converged = change <= _STALL_TOL * (1.0 + cost)
     return converged, theta, jac.T @ jac, cost
 
 
@@ -398,6 +424,7 @@ def fit_photopeak(
     seed_mu: float | None = None,
     seed_sigma: float | None = None,
     adapt_width: bool = False,
+    mode_range: tuple[float, float] | None = None,
 ) -> PeakFit:
     """Fit the photopeak of ``values`` (see the module docstring).
 
@@ -410,6 +437,8 @@ def fit_photopeak(
         window_hi_sigma: Window extent above the mean, in sigmas.
         window_iterations: Most fits (window re-centrings).
         seed_mu: Mean seed (default: the mode of the smoothed histogram).
+        mode_range: Search the mode only in this range of x (default: the
+            whole histogram).
         seed_sigma: Sigma that sets the window width (default: from the
             smoothed half maximum).
         adapt_width: Also resize the window to each fit's sigma. Off by
@@ -427,7 +456,11 @@ def fit_photopeak(
     if counts.sum() < MIN_WINDOW_COUNTS:
         return _fail("too few counts in the histogram", n)
     smoothed = smooth(counts)
-    i_max = int(np.argmax(smoothed))
+    candidates = np.arange(len(centres))
+    if mode_range is not None:
+        inside = candidates[(centres >= mode_range[0]) & (centres <= mode_range[1])]
+        candidates = inside if len(inside) else candidates
+    i_max = int(candidates[np.argmax(smoothed[candidates])])
     mu = float(centres[i_max]) if seed_mu is None or not math.isfinite(seed_mu) else seed_mu
     if seed_sigma is not None and math.isfinite(seed_sigma) and seed_sigma > 0:
         sigma = float(seed_sigma)
@@ -521,33 +554,46 @@ def kde_spectrum(
 
 
 def width_pct(values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BANDWIDTH) -> float:
-    """Full width at ``fraction`` of the maximum of :func:`kde_spectrum`, in % of the peak.
+    """Full width of the net photopeak at ``fraction`` of its height, in % of the peak.
 
-    The crossings of ``fraction * max`` are found by walking outwards from the
-    maximum and interpolating linearly between grid points; the peak position
-    is the maximum's grid point refined by a parabola through its neighbours.
+    On :func:`kde_spectrum`: the maximum is searched in :data:`PEAK_SEARCH`
+    (the continuum of a weak 511 keV peak can be higher further down); the
+    continuum level ``B`` is the median of the spectrum
+    :data:`CONTINUUM_OFFSETS` below the peak; the crossings of ``B + fraction
+    * (max - B)`` are found by walking outwards from the maximum and
+    interpolating linearly between grid points. The peak position is the
+    maximum's grid point refined by a parabola through its neighbours.
 
     Returns:
-        The width in %, or NaN below ``MIN_METRIC_EVENTS`` values or when a
-        crossing lies outside :data:`KDE_RANGE`.
+        The width in %, or NaN below ``MIN_METRIC_EVENTS`` values, when the
+        continuum is above ``MAX_CONTINUUM_FRACTION`` of the maximum, or when
+        the low crossing is not above the continuum window (the tail merges
+        with the continuum).
     """
     v = np.asarray(values, dtype=np.float64)
     v = v[np.isfinite(v)]
     if len(v) < MIN_METRIC_EVENTS:
         return math.nan
     centres, density = kde_spectrum(v, bandwidth)
-    i = int(np.argmax(density))
+    search = np.flatnonzero((centres >= PEAK_SEARCH[0]) & (centres <= PEAK_SEARCH[1]))
+    i = int(search[np.argmax(density[search])])
     top = density[i]
-    if top <= 0 or i == 0 or i == len(density) - 1:
+    if i == 0 or i == len(density) - 1:
         return math.nan
-    level = fraction * top
+    peak_x = centres[i]
+    far, near = CONTINUUM_OFFSETS
+    window = (centres >= peak_x - far) & (centres <= peak_x - near)
+    continuum = float(np.median(density[window])) if window.any() else 0.0
+    if continuum > MAX_CONTINUUM_FRACTION * top:
+        return math.nan  # no peak standing out of the continuum
+    level = continuum + fraction * (top - continuum)
     left = i
     while left > 0 and density[left] > level:
         left -= 1
     right = i
     while right < len(density) - 1 and density[right] > level:
         right += 1
-    if density[left] > level or density[right] > level:
+    if density[right] > level or centres[left] < peak_x - near:
         return math.nan
 
     def cross(a: int, b: int) -> float:
@@ -559,15 +605,15 @@ def width_pct(values: npt.ArrayLike, fraction: float, bandwidth: float = KDE_BAN
     x_right = cross(right, right - 1)
     denom = density[i - 1] - 2.0 * top + density[i + 1]
     shift = 0.5 * (density[i - 1] - density[i + 1]) / denom if denom < 0 else 0.0
-    peak = float(centres[i] + shift * (centres[1] - centres[0]))
+    peak = float(peak_x + shift * (centres[1] - centres[0]))
     return 100.0 * (x_right - x_left) / peak
 
 
 def fwhm_pct(values: npt.ArrayLike, bandwidth: float = KDE_BANDWIDTH) -> float:
-    """Full width at half maximum of the smoothed spectrum, in % of the peak position."""
+    """Full width at half maximum of the net photopeak (see :func:`width_pct`), in %."""
     return width_pct(values, 0.5, bandwidth)
 
 
 def fwtm_pct(values: npt.ArrayLike, bandwidth: float = KDE_BANDWIDTH) -> float:
-    """Full width at a tenth of the maximum of the smoothed spectrum, in % of the peak."""
+    """Full width at a tenth of the net photopeak (see :func:`width_pct`), in %."""
     return width_pct(values, 0.1, bandwidth)

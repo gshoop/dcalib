@@ -725,6 +725,13 @@ class DepthSession:
         """
         opened = self._require_open()
         with self._exclusive("Fit All"):
+            try:
+                ResultsFile(opened.results_path).check_writable()
+            except OSError as exc:
+                raise SessionError(
+                    f"The results could not be stored: {exc}; start dcalib-gui with "
+                    "--results PATH to keep them elsewhere"
+                ) from exc
             analysis = analyze_all(
                 opened.cache_path,
                 opened.calibrations,

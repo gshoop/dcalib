@@ -598,7 +598,17 @@ class MainWindow(QMainWindow):
     # -- selection -----------------------------------------------------------
 
     def select_anode(self, requested: AnodeKey | tuple[int, int, int, int]) -> None:
-        """Show an anode everywhere and load its events for the Depth and Spectra tabs."""
+        """Show an anode everywhere and load its events for the Depth and Spectra tabs.
+
+        With results, an anode without a result has no 1A1C event (the results
+        cover every anode with one): the views say so and nothing is loaded.
+        """
+        wanted = AnodeKey(*(int(v) for v in requested))
+        if self.session.has_results and self.session.result(wanted) is None:
+            self._show_no_anode(wanted.node, wanted.board, f"{anode_title(wanted)}: no 1A1C events")
+            self.system_map.set_selection(wanted.node, wanted.board, wanted)
+            self._update_board_grid(wanted)
+            return
         selected = self.session.select(requested)
         if selected is None:
             return
@@ -635,19 +645,35 @@ class MainWindow(QMainWindow):
             self.select_anode(key)
 
     def _on_map_channel_selected(self, channel: ChannelAddress) -> None:
-        view = self.session.views().get(AnodeKey(*channel))
+        key = AnodeKey(*channel)
+        view = self.session.views().get(key)
         if view is not None and view.is_cathode:
             self._status(f"{anode_title(channel)}: cathode, keV calibration {view.status}", 5000)
             return
-        self.select_anode(AnodeKey(*channel))
+        self.select_anode(key)
 
     def _on_map_board_selected(self, node: int, board: int) -> None:
         current = self.session.selection
         if current is not None and (current.node, current.board) == (node, board):
             return
+        if (node, board) not in self.session.boards():
+            message = f"Node {node} Board {board}: no events on this board"
+            self._show_no_anode(node, board, message)
+            self.board_grid.clear(message)
+            return
         anodes = self.session.anodes_on_board(node, board)
         if anodes:
             self.select_anode(anodes[0])
+
+    def _show_no_anode(self, node: int, board: int, message: str) -> None:
+        """Select no anode (a board or an anode without events); the map keeps its cursor."""
+        self.session.select(None)
+        self._drop_data_load()
+        self.band.show_no_anode(node, board, message)
+        self.inspector.clear(message)
+        self.depth_view.clear(message)
+        self.spectra_view.clear(message)
+        self._update_actions()
 
     def _on_options_changed(self, options: DepthOptions) -> None:
         self.session.options = options

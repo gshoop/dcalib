@@ -1,12 +1,10 @@
 # Depth Calibration from the adc2kev Cache: Plan
 
 **Status:** Plan drafted 2026-09-24 from a brainstorming session; decisions D1-D13 confirmed by the
-user. Phases 0-7 are implemented (skeleton; options, channels, calibrations and event building;
-the legacy replica, `dcalib legacy` and the C++ cross-check; the default depth fit and metrics;
-the analysis driver, sidecar results, exports, `dcalib process` and the full-system census; the
-held-out validation; the GUI shell with the System Map, the Depth tab, the Fit Inspector and Fit
-All; the Spectra, Board grid and Fleet summary tabs, re-fit overrides, Reject, export and the
-stale-results banner; see `docs/ALGORITHM.md`).
+user. All phases 0-8 are implemented and committed (2026-09-24); phase 8 awaits the user's review
+(its "Done when"). User docs: `README.md` (install, CLI, files, outputs) and `docs/GUI.md` (with
+screenshots in `docs/images/`, rendered by `scripts/gui_screenshots.py`); the method, the C++
+cross-check, the census and the held-out validation: `docs/ALGORITHM.md`.
 **Repository:** `/home/swuupii/dcalib` (git, created in phase 0)
 **Package name:** `dcalib`. Console scripts: `dcalib` (CLI) and `dcalib-gui`.
 

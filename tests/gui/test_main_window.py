@@ -8,7 +8,8 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtTest import QTest
 from pytestqt.qtbot import QtBot
 
-from dcalib.channels import AnodeKey
+from dcalib.channels import AnodeKey, anode_channels
+from dcalib.gui.controls import ControlBand
 from dcalib.gui.depth_view import DepthDisplay
 from dcalib.gui.main import main as gui_main
 from dcalib.gui.window import TAB_TITLES
@@ -101,3 +102,69 @@ def test_open_error_and_cli_help(qtbot: QtBot, make_window: MakeWindow, tmp_path
     qtbot.waitUntil(lambda: bool(dialogs.errors), timeout=WAIT_MS)
     assert "not an HDF5" in dialogs.errors[0][1] and not window.session.is_open
     assert gui_main.__module__ == "dcalib.gui.main"
+
+
+def test_ctrl_arrows_follow_the_focus(
+    qtbot: QtBot, make_window: MakeWindow, results_cache: Path
+) -> None:
+    """Ctrl+Left/Right: Prev/Next anode, but a node step while the map's strip has the focus."""
+    window, _ = make_window()
+    window.open_cache(results_cache)
+    wait_open(qtbot, window)
+    first = window.session.selection
+    assert first == CONCAVE
+    window.tabs.setFocus()
+    QTest.keyClick(window.tabs, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+    after_next = window.session.selection
+    assert after_next is not None and after_next == window.session.step_anode(first, 1)
+    strip = window.system_map.board_strip
+    strip.setFocus()
+    # Node 4 has no events in the synthetic cache: the map moves there, no anode is selected.
+    QTest.keyClick(strip, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+    assert window.system_map.current_board == (after_next.node + 1, after_next.board)
+    assert window.session.selection is None
+    assert window.band.status_label.text().endswith("no events on this board")
+    assert not window.fit_channel_action.isEnabled()
+    # And back, at the same electrode.
+    QTest.keyClick(strip, Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: window.session.selection == after_next, timeout=WAIT_MS)
+    assert window.band.selected_anode() == after_next
+
+
+def test_boards_and_anodes_without_events(
+    qtbot: QtBot, make_window: MakeWindow, results_cache: Path
+) -> None:
+    window, _ = make_window()
+    window.open_cache(results_cache)
+    wait_open(qtbot, window)
+    window.system_map.board_selected.emit(9, 30)
+    message = "Node 9 Board 30: no events on this board"
+    assert window.session.selection is None and not window.data_pending
+    assert window.band.status_label.text() == message
+    assert window.band.selected_anode() is None
+    assert window.inspector.title_label.text() == message
+    assert window.depth_view.data is None and window.spectra_view.data is None
+    # An anode of a board with events but without a 1A1C event of its own.
+    fitted = set(window.session.anodes_on_board(3, 15))
+    empty = next(
+        AnodeKey(3, 15, rena, channel)
+        for rena, channel in anode_channels(15)
+        if AnodeKey(3, 15, rena, channel) not in fitted
+    )
+    window.select_anode(CONCAVE)
+    wait_open(qtbot, window)
+    window.select_anode(empty)
+    assert window.session.selection is None and not window.data_pending
+    assert window.band.status_label.text().endswith("no 1A1C events")
+    assert window.board_grid.board == (3, 15)
+
+
+def test_refit_tooltips_give_the_reason(qtbot: QtBot) -> None:
+    band = ControlBand()
+    qtbot.addWidget(band)
+    tip = band.fit_board_button.toolTip()
+    reason = "run Fit All first: there are no batch results to override"
+    band.set_actions_enabled(refit=False, revert=False, reject=False, fit_all=True, reason=reason)
+    assert band.fit_board_button.toolTip() == f"Unavailable: {reason}"
+    band.set_actions_enabled(refit=True, revert=False, reject=False, fit_all=True)
+    assert band.fit_board_button.toolTip() == tip

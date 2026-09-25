@@ -67,6 +67,7 @@ UNITS = {"x": "E/E0", "kev": "keV"}
 CURVE_COLOR = "#ff5555"
 GE_COLOR = "#4fc3f7"
 CS_COLOR = "#f48fb1"
+LEGEND_BRUSH = (0, 0, 0, 170)  # a dark, translucent legend background over the histograms
 RIDGE_COLORS = (
     "#ffd54f",
     "#81c784",
@@ -202,7 +203,7 @@ class DepthView(QWidget):
         self.residual_plot.addItem(pg.InfiniteLine(angle=0, pos=0.0, pen=pg.mkPen("#888888")))
         self.residual_plot.addItem(self.residual_errors)
         self.residual_plot.addItem(self.residual_points)
-        self.legend = self.before_plot.addLegend(offset=(-10, 10))
+        self.legend = self.before_plot.addLegend(offset=(-10, 10), brush=LEGEND_BRUSH)
 
         self.source_combo.currentIndexChanged.connect(self._on_controls_changed)
         self.unit_combo.currentIndexChanged.connect(self._on_controls_changed)

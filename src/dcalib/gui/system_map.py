@@ -259,6 +259,16 @@ def _draw_cell_row(
                 _draw_override_tick(painter, x0 + (index + 1) * cell_w, y, size)
 
 
+def _draw_selected_cell(painter: QPainter, rect: QRectF, cell: MapCell) -> None:
+    """Outline the selected cell, keeping its override tick visible inside the outline."""
+    _draw_outline(painter, rect, SELECTED_CHANNEL_OUTLINE)
+    if cell.is_override and rect.width() >= _MIN_TICK_CELL_WIDTH:
+        inner = rect.adjusted(0, _OUTLINE_WIDTH, -_OUTLINE_WIDTH, 0)
+        _draw_override_tick(
+            painter, inner.right(), inner.top(), tick_size(inner.width(), inner.height())
+        )
+
+
 def _draw_outline(painter: QPainter, rect: QRectF, color: str) -> None:
     """Draw a 2 px outline just inside ``rect``."""
     pen = QPen(QColor(color))
@@ -680,7 +690,7 @@ class PanelGridWidget(QWidget):
         if kind != _VIEW_KIND[self._view]:
             return  # e.g. a cathode channel while the anode view is shown
         rect = self.cell_rect(board_cells.node, board_cells.board, position)
-        _draw_outline(painter, rect, SELECTED_CHANNEL_OUTLINE)
+        _draw_selected_cell(painter, rect, board_cells.cells(kind)[position - 1])
 
 
 class BoardStripWidget(QWidget):
@@ -933,7 +943,19 @@ class BoardStripWidget(QWidget):
         a0.accept()
 
     def event(self, a0: QEvent | None) -> bool:
-        """Show the cell tooltip on hover, bound to the hovered cell's rectangle."""
+        """Show the cell tooltip on hover, bound to the hovered cell's rectangle.
+
+        Also claims Ctrl(+Shift)+Left/Right while the strip has the focus, so
+        they step nodes here instead of triggering a window shortcut (dcalib's
+        Prev/Next anode use the same keys).
+        """
+        if a0 is not None and a0.type() == QEvent.Type.ShortcutOverride:
+            key_event = cast(QKeyEvent, a0)
+            if key_event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and (
+                key_event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            ):
+                key_event.accept()
+                return True
         if a0 is not None and a0.type() == QEvent.Type.ToolTip:
             help_event = cast(QHelpEvent, a0)
             pos = help_event.pos()
@@ -986,7 +1008,9 @@ class BoardStripWidget(QWidget):
             self._paint_labels(painter, board, cell_w, fill)
             located = self._locate_selected()
             if located is not None:
-                _draw_outline(painter, self.cell_rect(*located), SELECTED_CHANNEL_OUTLINE)
+                kind, position = located
+                cell = board.cells(kind)[position - 1]
+                _draw_selected_cell(painter, self.cell_rect(kind, position), cell)
         finally:
             painter.end()
 

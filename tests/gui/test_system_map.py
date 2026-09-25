@@ -800,6 +800,19 @@ class TestOverrideTick:
             override.fill
         )
 
+    def test_selected_override_keeps_its_tick(self, strip: BoardStripWidget) -> None:
+        board = strip.board
+        assert board is not None
+        strip.set_selected_channel(board.anodes[4].channel)
+        rect = strip.cell_rect("anode", 5)
+        image = strip.grab().toImage()
+        # The outline covers the corner; the tick is drawn again just inside it.
+        assert image.pixelColor(QPoint(int(rect.right()) - 1, int(rect.top()) + 1)) == QColor(
+            SELECTED_CHANNEL_OUTLINE
+        )
+        inside = QPoint(int(rect.right()) - 4, int(rect.top()) + 3)
+        assert image.pixelColor(inside) == QColor(OVERRIDE_TICK_COLOR)
+
     def test_grid_only_when_cells_are_wide(self, grid: PanelGridWidget) -> None:
         model = grid.model
         assert model is not None

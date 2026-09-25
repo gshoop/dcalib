@@ -1,5 +1,5 @@
-"""Tests of the scripts: the C++ cross-check (``dump_chd.py``, ``compare_dcc.py``) and
-``validate_holdout.py``.
+"""Tests of the scripts: the C++ cross-check (``dump_chd.py``, ``compare_dcc.py``),
+``validate_holdout.py`` and the argument handling of ``gui_screenshots.py``.
 
 ``scripts/`` is not a package; the scripts are loaded from their files. Nothing
 here runs the C++ Dcalib binary or parses a raw ``.dat`` file (the held-out
@@ -226,3 +226,16 @@ class TestValidateHoldout:
         argv = ["--cache", str(depth_cache), "--ge", str(dat), "--cs", str(dat)]
         assert validate_holdout.main([*argv, "--work-dir", str(tmp_path / "w")]) == 2
         assert validate_holdout.main([*argv[:2], "--ge", str(tmp_path / "none.dat")]) == 2
+
+
+class TestGuiScreenshots:
+    """Only the argument handling: rendering needs its own QApplication (run by hand)."""
+
+    def test_arguments_and_missing_files(self, tmp_path: Path) -> None:
+        shots = _load("gui_screenshots")
+        args = shots._parse_args(["c.cache.h5", "--results", "r.depth.h5", "--anode", "1,17,0,9"])
+        assert args.anode == (1, 17, 0, 9) and args.override == (8, 28, 1, 7)
+        with pytest.raises(SystemExit):
+            shots._parse_args(["c.cache.h5", "--results", "r.depth.h5", "--anode", "1,17"])
+        missing = tmp_path / "missing.cache.h5"
+        assert shots.main([str(missing), "--results", str(missing), "--out", str(tmp_path)]) == 2

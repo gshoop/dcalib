@@ -86,6 +86,14 @@ def test_run_batch_apply_and_stale(depth_cache: Path, tmp_path: Path) -> None:
     assert stale.options == DepthOptions()  # a stale batch's options are not taken over
 
 
+def test_batch_needs_a_writable_results_file(depth_cache: Path, tmp_path: Path) -> None:
+    session = ses.DepthSession()
+    session.install(ses.open_cache(depth_cache, results_path=tmp_path / "gone" / "r.depth.h5"))
+    with pytest.raises(ses.SessionError, match="--results PATH"):
+        session.run_batch(DepthOptions(), workers=1)  # refused before the analysis
+    assert not session.busy
+
+
 def test_batch_stop_and_busy(depth_cache: Path) -> None:
     session = ses.DepthSession()
     session.install(ses.open_cache(depth_cache))

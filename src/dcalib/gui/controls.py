@@ -124,6 +124,9 @@ class ControlBand(QWidget):
         self.revert_button.setToolTip("Delete this anode's override: back to the batch result")
         self.fit_all_button = QPushButton("Fit All")
         self.fit_all_button.setToolTip("Analyse every board with these options (Process > Fit All)")
+        self._refit_tips = {
+            button: button.toolTip() for button in (self.fit_channel_button, self.fit_board_button)
+        }
         widget: QWidget
         for widget in (
             QLabel("Sources"),
@@ -197,9 +200,8 @@ class ControlBand(QWidget):
             (self.fit_all_button, fit_all),
         ):
             button.setEnabled(on)
-        if reason:
-            for button in (self.fit_channel_button, self.fit_board_button):
-                button.setToolTip(f"Unavailable: {reason}" if not refit else button.toolTip())
+        for button, tip in self._refit_tips.items():
+            button.setToolTip(f"Unavailable: {reason}" if reason and not refit else tip)
 
     def set_rejected(self, rejected: bool) -> None:
         """Show the review state without emitting ``reject_toggled``."""
@@ -278,6 +280,30 @@ class ControlBand(QWidget):
             self._updating = False
         self.show_status(status, flags, review)
         self.set_rejected(bool(review))
+
+    def show_no_anode(self, node: int, board: int, message: str) -> None:
+        """Show a board without a selected anode (e.g. one without events)."""
+        self._updating = True
+        try:
+            self.node_combo.setCurrentIndex(self.node_combo.findData(node))
+        finally:
+            self._updating = False
+        self._fill_boards()
+        self._updating = True
+        try:
+            self.board_combo.setCurrentIndex(self.board_combo.findData(board))
+        finally:
+            self._updating = False
+        self._fill_anodes()
+        self._updating = True
+        try:
+            self.anode_combo.setCurrentIndex(-1)
+        finally:
+            self._updating = False
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet("")
+        self.flags_label.setText("")
+        self.set_rejected(False)
 
     def show_status(self, status: str | None, flags: tuple[str, ...], review: str) -> None:
         category = status_category(status, flags, review=review) if status else CATEGORY_NOT_FITTED

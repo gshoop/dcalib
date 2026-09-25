@@ -38,6 +38,7 @@ HIST_RANGE = (0.60, 1.30)
 BEFORE_COLOR = "#8fa1b3"
 AFTER_COLOR = "#ebcb8b"
 FIT_COLOR = "#bf616a"
+LEGEND_BRUSH = (0, 0, 0, 170)
 PANELS = ((SOURCE_GE, 511.0, "511 keV (Ge-68)"), (SOURCE_CS, 662.0, "662 keV (Cs-137)"))
 
 
@@ -63,7 +64,8 @@ class _Panel:
             self.after_markers,
         ):
             plot.addItem(item)
-        self.legend = plot.addLegend(offset=(-5, 5))
+        # Top left, over the flat continuum below the photopeak.
+        self.legend = plot.addLegend(offset=(5, 5), brush=LEGEND_BRUSH)
         self.text = ""
         self.lines: list[str] = []
 

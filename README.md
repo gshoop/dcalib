@@ -9,8 +9,9 @@ legacy Dcalib layout plus a `depth_summary.csv`. A PyQt6/pyqtgraph GUI (`dcalib-
 anode's depth curve and before/after spectra, re-fits channels with other options and rejects bad
 corrections. It is a separate package built on [adc2kev](../adc2kev-python), like `uvcorr`.
 
-> Status: phases 0-4 of [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md)
-> are implemented: `dcalib process` and `dcalib legacy` work; the GUI is not implemented yet. The
+> Status: phases 0-6 of [`docs/planning/DEPTH_CALIBRATION_PLAN.md`](docs/planning/DEPTH_CALIBRATION_PLAN.md)
+> are implemented: `dcalib process` and `dcalib legacy` work, and the GUI browses the results
+> (System Map, Depth tab, Fit Inspector, Fit All); re-fits, review and export arrive in phase 7. The
 > algorithm, its deviations from the plan and the full-system census are in
 > [`docs/ALGORITHM.md`](docs/ALGORITHM.md).
 
@@ -47,7 +48,14 @@ Full documentation arrives in phase 8.
 
 ## GUI usage
 
-_To be written (phases 6-7)._ Planned: `dcalib-gui data.cache.h5`.
+```bash
+dcalib-gui data.cache.h5 [--results PATH] [--kev calibration.kev] [--workers N]
+```
+
+Opens the cache and the results stored in its sidecar. Click an anode on the System Map (or use
+the selectors, Prev/Next or Ctrl+Left/Right) to see its photopeak against C/A before and after the
+correction in the Depth tab, and every result field in the Fit Inspector. *Process > Fit All*
+(Ctrl+F) runs the whole analysis with the control band's options and stores it.
 
 ## Development
 
